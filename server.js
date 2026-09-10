@@ -80,7 +80,7 @@ app.post("/api/market", async (req, res) => {
     if (!key) return res.status(503).json({ error: "CARHUNT_API_KEY manquante. La comparaison marché n'est pas encore activée." });
     const v = req.body || {};
     if (!v.make || !v.model) return res.status(400).json({ error: "Marque/modèle nécessaires." });
-    const params = new URLSearchParams({ make: String(v.make).toUpperCase(), model: String(v.model).toUpperCase().replace(/\s+(?:[IVX]+|\d+)$/i, ""), page_size: "100" });
+    const params = new URLSearchParams({ make: String(v.make).toUpperCase(), model: String(v.model).toUpperCase().replace(/\s+(?:[IVX]+|\d+)$/i, ""), page_size: "50" });
     const r = await fetch(`https://api-pro.carhunt.fr/v1/listings/search?${params}`, { headers: { Authorization: `Bearer ${key}` } });
     if (!r.ok) { const detail = await r.text(); throw new Error(`CarHunt HTTP ${r.status}: ${detail}`); }
     const data = await r.json();
