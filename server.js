@@ -88,10 +88,11 @@ app.post("/api/market", async (req, res) => {
   if (!Number.isFinite(Number(x.price)) || Number(x.price) <= 0) return false;
   if (v.year && x.year && Math.abs(Number(x.year) - Number(v.year)) > 1) return false;
   if (v.mileage_km && x.mileage && Math.abs(Number(x.mileage) - Number(v.mileage_km)) > 30000) return false;
-  return true;
+  if (v.price_eur && v.year && v.mileage_km && Number(x.price) === Number(v.price_eur) && Number(x.year) === Number(v.year) && Number(x.mileage) === Number(v.mileage_km)) return false;
+      return true;
 });
     const prices = listings.map(x => Number(x.price)).sort((a,b) => a-b);
-    if (!prices.length) return res.json({ ok: true, comparables: 0, market_median_eur: null, low_eur: null, high_eur: null, deal_score: null });
+    if (!prices.length < 5) return res.json({ ok: true, comparables: 0, market_median_eur: null, low_eur: null, high_eur: null, deal_score: null });
     const median = prices[Math.floor(prices.length / 2)];
     const q = p => prices[Math.max(0, Math.min(prices.length - 1, Math.floor((prices.length - 1) * p)))];
     const asking = Number(v.price_eur);
