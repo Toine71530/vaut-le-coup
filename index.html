@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0b2239"><title>Vaut le Coup ? — V1</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#eef3f7;color:#102337}.app{max-width:520px;margin:auto;min-height:100vh;background:#f8fafc}
+header{background:#0b2239;color:#fff;padding:22px 20px 25px;border-radius:0 0 28px 28px}.logo{font-size:25px;font-weight:850}.logo b{color:#48df70}.tag{opacity:.82;font-size:14px;margin-top:4px}
+main{padding:18px}.card{background:#fff;border-radius:20px;padding:18px;margin-bottom:13px;box-shadow:0 5px 20px #10233710}h1{font-size:24px;margin:0 0 6px}.sub{color:#66788a;font-size:14px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:15px}.cat{border:0;background:#f1f5f9;border-radius:16px;padding:14px;text-align:left;font-weight:750;color:#102337}.cat span{display:block;font-size:25px}.cat small{font-weight:500;color:#718096}
+.upload{border:2px dashed #b9c8d5;border-radius:17px;padding:20px;text-align:center;margin-top:15px;background:#fbfdff}input{display:none}.preview{display:none;width:100%;max-height:260px;object-fit:cover;border-radius:13px;margin-top:12px}
+button{cursor:pointer}.primary{width:100%;border:0;background:#22c55e;color:#fff;border-radius:15px;padding:15px;font-size:16px;font-weight:800;margin-top:14px}.secondary{border:1px solid #cdd8e1;background:#fff;border-radius:12px;padding:10px 12px;font-weight:700}
+.status{display:none}.bar{height:10px;background:#dbe5ec;border-radius:10px;overflow:hidden}.fill{height:100%;width:0;background:#22c55e;transition:width .4s}
+.result{display:none}.verdict{border-radius:18px;padding:18px;background:#dcfce7;color:#166534}.score{font-size:32px;font-weight:900}.pill{display:inline-block;background:#eef6ff;border-radius:99px;padding:5px 9px;font-size:12px;margin:3px 3px 0 0}
+.row{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid #edf1f4}.row:last-child{border:0}.good{color:#16a34a;font-weight:800}.warn{color:#d97706;font-weight:800}.bad{color:#dc2626;font-weight:800}
+.notice{font-size:12px;color:#718096;line-height:1.45}.hidden{display:none}nav{position:sticky;bottom:0;background:#fff;border-top:1px solid #e5e7eb;padding:11px;display:flex;justify-content:space-around;color:#667788;font-size:12px}
+</style></head>
+<body><div class="app">
+<header><div class="logo">Vaut le Coup<span>?</span> <b>✓</b></div><div class="tag">Avant d’acheter. Demande à l’IA.</div></header>
+<main>
+<div class="card">
+<h1 id="title">Analyse une annonce</h1><div class="sub">V0.2 test — photo, capture ou texte d’annonce.</div>
+<div class="upload"><label for="photo"><strong>📸 Importer une annonce</strong><br><small>JPG, PNG ou capture d'écran</small></label><input id="photo" type="file" accept="image/*"><img id="preview" class="preview">
+<div id="ocrbox" style="display:none;text-align:left;margin-top:12px">
+<div id="ocrstatus" class="sub">Lecture du texte…</div>
+<textarea id="ocrtext" placeholder="Le texte détecté apparaîtra ici. Tu peux le corriger si besoin." style="width:100%;min-height:110px;margin-top:8px;padding:10px;border:1px solid #cdd8e1;border-radius:12px;font:inherit;box-sizing:border-box"></textarea>
+</div></div>
+<button class="primary" id="analyze">Analyser l'annonce</button>
+</div>
+<div class="card status" id="status"><strong>🤖 Analyse en cours…</strong><p id="step" class="sub">Lecture de l'annonce</p><div class="bar"><div class="fill" id="fill"></div></div></div>
+<div class="result" id="result">
+<div class="card"><div class="verdict"><div id="verdict">🟢 BON ACHAT</div><div class="score" id="score">82/100</div><div id="summary">Prix correctement positionné, sous réserve de vérification de l'entretien.</div></div></div>
+<div class="card"><h3>📋 Informations détectées</h3><div id="facts"></div></div>
+<div class="card"><h3>💶 Positionnement du prix</h3><div id="pricing"></div></div>
+<div class="card"><h3>🔎 Points à vérifier</h3><div id="checks"></div></div>
+<div class="card"><h3>💬 Conseil de négociation</h3><p id="negotiation"></p><button class="secondary" onclick="navigator.clipboard?.writeText(document.getElementById('negotiation').textContent)">Copier le conseil</button></div>
+<div class="card"><h3>⚠️ Important</h3><p class="notice">Cette V1 est un prototype : les données de marché utilisées ici sont des données de démonstration. La version production devra brancher des sources externes vérifiées avant de fournir une estimation commerciale réelle.</p></div>
+</div>
+</main><nav><b>⌂ Analyse</b><span>◷ Historique</span><span>♡ Favoris</span><span>♙ Profil</span></nav>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+let imageFile=null;
+
+$("photo").onchange=async e=>{
+  imageFile=e.target.files[0];
+  if(!imageFile)return;
+  const p=$("preview"); p.src=URL.createObjectURL(imageFile); p.style.display="block";
+  $("ocrbox").style.display="block";
+  $("ocrstatus").textContent="Lecture du texte de l'annonce…";
+  $("ocrtext").value="";
+  try{
+    if(typeof Tesseract==="undefined") throw new Error("OCR indisponible");
+    const {data}=await Tesseract.recognize(imageFile,"fra",{logger:m=>{
+      if(m.status==="recognizing text") $("ocrstatus").textContent="Lecture du texte… "+Math.round(m.progress*100)+" %";
+    }});
+    $("ocrtext").value=(data.text||"").trim();
+    $("ocrstatus").textContent=$("ocrtext").value
+      ? "Texte détecté. Vérifie-le puis appuie sur « Analyser l'annonce »."
+      : "Aucun texte lisible. Tu peux saisir les informations manuellement.";
+  }catch(e){
+    $("ocrstatus").textContent="Lecture automatique indisponible. Saisis ou colle le texte de l'annonce ci-dessous.";
+  }
+};
+
+function extract(text){
+  const t=text.replace(/\u00a0/g," ");
+  const out={make:"",model:"",version:"",year:null,km:null,price:null};
+  const price=(t.match(/(\d{1,3}(?:[ .]\d{3})+|\d{4,6})\s*€/i)||[])[1];
+  if(price) out.price=parseInt(price.replace(/[ .]/g,""),10);
+  const km=(t.match(/(\d{1,3}(?:[ .]\d{3})+|\d{4,6})\s*km\b/i)||[])[1];
+  if(km) out.km=parseInt(km.replace(/[ .]/g,""),10);
+  const y=(t.match(/\b(20(?:1[5-9]|2[0-9]))\b/)||[])[1];
+  if(y) out.year=parseInt(y,10);
+  const brands=["Peugeot","Renault","Citroën","Citroen","Toyota","Volkswagen","BMW","Audi","Mercedes","Dacia","Tesla","Ford","Opel","Nissan","Hyundai","Kia","Fiat","Volvo","Honda","Skoda"];
+  for(const b of brands){if(new RegExp("\\b"+b+"\\b","i").test(t)){out.make=b==="Citroen"?"Citroën":b;break;}}
+  const models=["Prius","3008","208","308","Clio","Captur","Duster","C3","Golf","Model 3","Yaris","Corolla","Megane","Scenic","Tiguan","Polo","Serie 1","Série 1"];
+  for(const m of models){if(new RegExp("\\b"+m.replace(" ","\\s+")+"\\b","i").test(t)){out.model=m;break;}}
+  const ver=(t.match(/\b(?:1[.,]\d|2[.,]\d|3[.,]\d)\s*[A-Za-zÀ-ÿ0-9 -]{3,35}/)||[])[0];
+  if(ver) out.version=ver.trim();
+  return out;
+}
+
+$("analyze").onclick=()=>{
+ const text=$("ocrtext").value.trim();
+ if(!text){
+   $("ocrbox").style.display="block";
+   $("ocrstatus").textContent="Aucun texte détecté. Saisis ou colle le texte de l'annonce puis relance l'analyse.";
+   return;
+ }
+ const d=extract(text);
+ $("status").style.display="block";$("result").style.display="none";$("fill").style.width="0%";
+ const steps=["Lecture de l'annonce…","Extraction des caractéristiques…","Contrôle des informations…","Préparation de l'évaluation…","Calcul du résultat de démonstration…"];
+ let i=0;
+ const t=setInterval(()=>{
+   $("fill").style.width=((i+1)*20)+"%";$("step").textContent=steps[i++];
+   if(i===steps.length){clearInterval(t);setTimeout(()=>showResult(d),350)}
+ },450);
+};
+
+function euro(v){return v==null?"Non détecté":v.toLocaleString("fr-FR")+" €";}
+function showResult(d){
+ $("status").style.display="none";$("result").style.display="block";
+ const vehicle=[d.make,d.model].filter(Boolean).join(" ")||"Non détecté";
+ $("verdict").textContent="⚪ ANALYSE À CONFIRMER";
+ $("score").textContent="—/100";
+ $("summary").textContent="Les caractéristiques ont été lues, mais aucun prix de marché vérifié n'est encore connecté.";
+ $("facts").innerHTML=
+ `<div class="row"><span>Véhicule</span><b>${vehicle}</b></div>`+
+ `<div class="row"><span>Version</span><b>${d.version||"À confirmer"}</b></div>`+
+ `<div class="row"><span>Année</span><b>${d.year||"À confirmer"}</b></div>`+
+ `<div class="row"><span>Kilométrage</span><b>${d.km?d.km.toLocaleString("fr-FR")+" km":"À confirmer"}</b></div>`+
+ `<div class="row"><span>Prix demandé</span><b>${euro(d.price)}</b></div>`;
+ $("pricing").innerHTML=
+ `<div class="row"><span>Valeur marché</span><b>En attente de données marché</b></div>`+
+ `<div class="row"><span>Fourchette</span><b>Non calculée</b></div>`+
+ `<div class="row"><span>Score valeur</span><b>Non calculé</b></div>`;
+ $("checks").innerHTML=
+ `<div class="row"><span>Texte de l'annonce</span><b>${d.make&&d.model&&d.year&&d.km&&d.price?"Informations principales détectées":"Informations incomplètes"}</b></div>`+
+ `<div class="row"><span>Historique et factures</span><b class="warn">À vérifier</b></div>`+
+ `<div class="row"><span>Entretien</span><b class="warn">À vérifier</b></div>`+
+ `<div class="row"><span>Essai + contrôle</span><b>Indispensable</b></div>`;
+ $("negotiation").textContent="Je ne donne pas encore de prix de négociation : il faut d'abord connecter une source de marché vérifiée. C'est volontaire pour éviter de fabriquer une estimation.";
+}
+</script></body></html>
