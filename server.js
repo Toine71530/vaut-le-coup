@@ -92,7 +92,7 @@ app.post("/api/market", async (req, res) => {
       return true;
 });
     const prices = listings.map(x => Number(x.price)).sort((a,b) => a-b);
-    if (!prices.length < 5) return res.json({ ok: true, comparables: 0, market_median_eur: null, low_eur: null, high_eur: null, deal_score: null });
+    if (prices.length < 5) return res.json({ ok: true, comparables: 0, market_median_eur: null, low_eur: null, high_eur: null, deal_score: null });
     const median = prices[Math.floor(prices.length / 2)];
     const q = p => prices[Math.max(0, Math.min(prices.length - 1, Math.floor((prices.length - 1) * p)))];
     const asking = Number(v.price_eur);
