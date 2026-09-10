@@ -84,7 +84,12 @@ app.post("/api/market", async (req, res) => {
     const r = await fetch(`https://api-pro.carhunt.fr/v1/listings/search?${params}`, { headers: { Authorization: `Bearer ${key}` } });
     if (!r.ok) { const detail = await r.text(); throw new Error(`CarHunt HTTP ${r.status}: ${detail}`); }
     const data = await r.json();
-    const listings = (data.listings || []).filter(x => Number.isFinite(Number(x.price)) && Number(x.price) > 0);
+    const listings = (data.listings || []).filter(x => {
+  if (!Number.isFinite(Number(x.price)) || Number(x.price) <= 0) return false;
+  if (v.year && x.year && Math.abs(Number(x.year) - Number(v.year)) > 1) return false;
+  if (v.mileage_km && x.mileage && Math.abs(Number(x.mileage) - Number(v.mileage_km)) > 30000) return false;
+  return true;
+});
     const prices = listings.map(x => Number(x.price)).sort((a,b) => a-b);
     if (!prices.length) return res.json({ ok: true, comparables: 0, market_median_eur: null, low_eur: null, high_eur: null, deal_score: null });
     const median = prices[Math.floor(prices.length / 2)];
