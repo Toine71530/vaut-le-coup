@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0b2239"><link rel="manifest" href="manifest.json"><title>Vaut le Coup ? — V1</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#eef3f7;color:#102337}.app{max-width:520px;margin:auto;min-height:100vh;background:#f8fafc}
+header{background:#0b2239;color:#fff;padding:22px 20px 25px;border-radius:0 0 28px 28px}.logo{font-size:25px;font-weight:850}.logo b{color:#48df70}.tag{opacity:.82;font-size:14px;margin-top:4px}
+main{padding:18px}.card{background:#fff;border-radius:20px;padding:18px;margin-bottom:13px;box-shadow:0 5px 20px #10233710}h1{font-size:24px;margin:0 0 6px}.sub{color:#66788a;font-size:14px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:15px}.cat{border:0;background:#f1f5f9;border-radius:16px;padding:14px;text-align:left;font-weight:750;color:#102337}.cat span{display:block;font-size:25px}.cat small{font-weight:500;color:#718096}
+.upload{border:2px dashed #b9c8d5;border-radius:17px;padding:20px;text-align:center;margin-top:15px;background:#fbfdff}input{display:none}.preview{display:none;width:100%;max-height:260px;object-fit:cover;border-radius:13px;margin-top:12px}
+button{cursor:pointer}.primary{width:100%;border:0;background:#22c55e;color:#fff;border-radius:15px;padding:15px;font-size:16px;font-weight:800;margin-top:14px}.secondary{border:1px solid #cdd8e1;background:#fff;border-radius:12px;padding:10px 12px;font-weight:700}
+.status{display:none}.bar{height:10px;background:#dbe5ec;border-radius:10px;overflow:hidden}.fill{height:100%;width:0;background:#22c55e;transition:width .4s}
+.result{display:none}.verdict{border-radius:18px;padding:18px;background:#dcfce7;color:#166534}.score{font-size:32px;font-weight:900}.pill{display:inline-block;background:#eef6ff;border-radius:99px;padding:5px 9px;font-size:12px;margin:3px 3px 0 0}
+.row{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid #edf1f4}.row:last-child{border:0}.good{color:#16a34a;font-weight:800}.warn{color:#d97706;font-weight:800}.bad{color:#dc2626;font-weight:800}
+.notice{font-size:12px;color:#718096;line-height:1.45}.hidden{display:none}nav{position:sticky;bottom:0;background:#fff;border-top:1px solid #e5e7eb;padding:11px;display:flex;justify-content:space-around;color:#667788;font-size:12px}
+</style></head>
+<body><div class="app">
+<header><div class="logo">Vaut le Coup<span>?</span> <b>✓</b></div><div class="tag">Avant d’acheter. Demande à l’IA.</div></header>
+<main>
+<div class="card">
+<h1 id="title">Analyse une annonce</h1><div class="sub">V1 automobile — commence par une photo ou une capture d’écran.</div>
+<div class="upload"><label for="photo"><strong>📸 Importer une annonce</strong><br><small>JPG, PNG ou capture d'écran</small></label><input id="photo" type="file" accept="image/*"><img id="preview" class="preview"></div>
+<button class="primary" id="analyze">Analyser l'annonce</button>
+</div>
+<div class="card status" id="status"><strong>🤖 Analyse en cours…</strong><p id="step" class="sub">Lecture de l'annonce</p><div class="bar"><div class="fill" id="fill"></div></div></div>
+<div class="result" id="result">
+<div class="card"><div class="verdict"><div id="verdict">🟢 BON ACHAT</div><div class="score" id="score">82/100</div><div id="summary">Prix correctement positionné, sous réserve de vérification de l'entretien.</div></div></div>
+<div class="card"><h3>📋 Informations détectées</h3><div id="facts"></div></div>
+<div class="card"><h3>💶 Positionnement du prix</h3><div id="pricing"></div></div>
+<div class="card"><h3>🔎 Points à vérifier</h3><div id="checks"></div></div>
+<div class="card"><h3>💬 Conseil de négociation</h3><p id="negotiation"></p><button class="secondary" onclick="navigator.clipboard?.writeText(document.getElementById('negotiation').textContent)">Copier le conseil</button></div>
+<div class="card"><h3>⚠️ Important</h3><p class="notice">Cette V1 est un prototype : les données de marché utilisées ici sont des données de démonstration. La version production devra brancher des sources externes vérifiées avant de fournir une estimation commerciale réelle.</p></div>
+</div>
+</main><nav><b>⌂ Analyse</b><span>◷ Historique</span><span>♡ Favoris</span><span>♙ Profil</span></nav>
+</div>
+<script>
+const demo={make:"Peugeot",model:"3008",version:"1.5 BlueHDi 130 ch",year:2021,km:72000,price:21900,marketLow:20500,marketHigh:21500,score:82};
+const $=id=>document.getElementById(id);
+$("photo").onchange=e=>{const f=e.target.files[0];if(!f)return;const p=$("preview");p.src=URL.createObjectURL(f);p.style.display="block";};
+$("analyze").onclick=()=>{
+ $("status").style.display="block";$("result").style.display="none";$("fill").style.width="0%";
+ const steps=["Lecture de l'annonce…","Extraction des caractéristiques…","Comparaison au marché…","Évaluation des risques…","Calcul du score…"];let i=0;
+ const t=setInterval(()=>{ $("fill").style.width=((i+1)*20)+"%";$("step").textContent=steps[i++];if(i===steps.length){clearInterval(t);setTimeout(showResult,350)}},450);
+};
+function showResult(){
+ const d=demo; $("status").style.display="none";$("result").style.display="block";
+ $("facts").innerHTML=`<div class="row"><span>Véhicule</span><b>${d.make} ${d.model}</b></div><div class="row"><span>Version</span><b>${d.version}</b></div><div class="row"><span>Année</span><b>${d.year}</b></div><div class="row"><span>Kilométrage</span><b>${d.km.toLocaleString("fr-FR")} km</b></div><div class="row"><span>Prix demandé</span><b>${d.price.toLocaleString("fr-FR")} €</b></div>`;
+ const delta=d.price-d.marketHigh; $("pricing").innerHTML=`<div class="row"><span>Fourchette estimée</span><b>${d.marketLow.toLocaleString("fr-FR")} – ${d.marketHigh.toLocaleString("fr-FR")} €</b></div><div class="row"><span>Écart au haut de fourchette</span><b class="${delta<=0?'good':'warn'}">${delta<=0?'Dans la fourchette':'+'+delta.toLocaleString("fr-FR")+' €'}</b></div><div class="row"><span>Score valeur</span><b class="good">${d.score}/100</b></div>`;
+ $("checks").innerHTML="<div class='row'><span>Historique et factures</span><b class='warn'>À vérifier</b></div><div class='row'><span>Entretien</span><b class='warn'>À vérifier</b></div><div class='row'><span>Nombre de propriétaires</span><b>À confirmer</b></div><div class='row'><span>Essai + contrôle</span><b>Indispensable</b></div>";
+ $("negotiation").textContent="Je tenterais 20 500 €. Si le vendeur accepte autour de 21 000 €, l'achat reste cohérent si l'entretien est complet et que le contrôle ne révèle pas de défaut.";
+}
+</script></body></html>
