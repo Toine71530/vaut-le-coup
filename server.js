@@ -83,8 +83,6 @@ app.post("/api/market", async (req, res) => {
     const params = new URLSearchParams({ make: String(v.make).toUpperCase(), model: String(v.model).toUpperCase(), page_size: "100" });
     if (v.year) { params.set("year_min", String(Number(v.year) - 1)); params.set("year_max", String(Number(v.year) + 1)); }
     if (v.mileage_km) { params.set("mileage_min", String(Math.max(0, Number(v.mileage_km) - 30000))); params.set("mileage_max", String(Number(v.mileage_km) + 30000)); }
-    if (v.energy) params.set("energy", String(v.energy));
-    if (v.gearbox) params.set("gearbox", String(v.gearbox));
     const r = await fetch(`https://api-pro.carhunt.fr/v1/listings/search?${params}`, { headers: { Authorization: `Bearer ${key}` } });
     if (!r.ok) throw new Error(`CarHunt HTTP ${r.status}`);
     const data = await r.json();
