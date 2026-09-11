@@ -28,13 +28,26 @@ function cleanJson(text) {
 
 app.get("/", (_req, res) => res.type("html").send(HTML));
 
-app.post("/api/analyze", upload.single("image"), async (req, res) => {
+app.post("/api/analyze", upload.array("images", 3), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Aucune image reçue." });
-    if (!openai) return res.status(503).json({ error: "OPENAI_API_KEY manquante. Le moteur IA n'est pas configuré." });
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: "Ajoute au moins une photo." });
+    }
 
-    const mime = req.file.mimetype || "image/jpeg";
-    const dataUrl = `data:${mime};base64,${req.file.buffer.toString("base64")}`;
+    if (!openai) {
+      return res.status(503).json({
+        error: "OPENAI_API_KEY manquante. Le moteur IA n'est pas configuré."
+      });
+    }
+
+    if (req.files.length > 3) {
+      return res.status(400).json({ error: "Maximum 3 photos." });
+    }
+
+    const images = req.files.map(file => {
+      const mime = file.mimetype || "image/jpeg";
+      return `data:${mime};base64,${file.buffer.toString("base64")}`;
+    });
 
     const prompt = `Tu es le moteur de lecture de l'application française "Vaut le Coup ?".
 Analyse UNIQUEMENT les informations réellement visibles dans cette capture d'annonce automobile.
