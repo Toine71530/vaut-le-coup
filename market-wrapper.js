@@ -52,8 +52,20 @@ function proxy(req, res) {
       const type = String(up.headers["content-type"] || "");
       if (type.includes("text/html")) {
         let html = raw.toString("utf8");
-        html = html.replace("</head>", `<style>.status,.result{transition:background .25s,border-color .25s,box-shadow .25s}.status{border:2px solid transparent}.status.market-good{background:#e8f7ed;border-color:#8ed0a3;box-shadow:0 8px 24px #19875418}.status.market-ok{background:#edf6ff;border-color:#91c2ef}.status.market-bad{background:#fff0ed;border-color:#efaa9d}.status.market-unknown{background:#fff7df;border-color:#e7c76b}.score{letter-spacing:.1px}.card{border-color:#dce4eb}</style></head>`);
-        html = html.replace("</body>", `<script>(function(){function paint(){const box=document.querySelector('#market .status');if(!box)return;const t=box.innerText.toLowerCase();box.classList.remove('market-good','market-ok','market-bad','market-unknown');if(t.includes('très intéressant')||t.includes('plutôt intéressant'))box.classList.add('market-good');else if(t.includes('dans le marché'))box.classList.add('market-ok');else if(t.includes('plutôt cher')||t.includes('cher'))box.classList.add('market-bad');else if(t.includes('insuffisant')||t.includes('non déterminé'))box.classList.add('market-unknown')}new MutationObserver(paint).observe(document.body,{subtree:true,childList:true,characterData:true});paint()})();</script></body>`);
+        html = html.replace("</head>", `<style>
+.previews{display:flex;flex-wrap:nowrap;gap:10px;margin-top:12px;overflow-x:auto;align-items:flex-start}
+.thumb{position:relative;flex:1 1 0;width:auto;max-width:none;height:auto;aspect-ratio:1;min-width:0}
+.thumb img{width:100%;height:100%;object-fit:cover;border-radius:18px;border:1px solid #ddd}
+.remove{z-index:2}
+.analysis-progress{display:none;margin-top:18px;padding:18px;border-radius:20px;background:#f4f7fa;border:1px solid #dce4eb}
+.analysis-progress.active{display:block}
+.analysis-progress-title{font-weight:800;font-size:18px;margin-bottom:10px}
+.analysis-progress-track{height:12px;background:#e1e6eb;border-radius:99px;overflow:hidden}
+.analysis-progress-bar{height:100%;width:8%;border-radius:99px;background:#17212b;transition:width .7s ease}
+.analysis-progress-note{font-size:14px;color:#68727d;margin-top:9px}
+</style></head>`);
+        html = html.replace("<div id=\"error\"></div>", `<div id="error"></div><div id="analysis-progress" class="analysis-progress" aria-live="polite"><div id="analysis-progress-title" class="analysis-progress-title">Analyse des photos…</div><div class="analysis-progress-track"><div id="analysis-progress-bar" class="analysis-progress-bar"></div></div><div id="analysis-progress-note" class="analysis-progress-note">Lecture des informations visibles</div></div>`);
+        html = html.replace("</body>", `<script>(function(){const go=document.getElementById('go'),box=document.getElementById('analysis-progress'),bar=document.getElementById('analysis-progress-bar'),title=document.getElementById('analysis-progress-title'),note=document.getElementById('analysis-progress-note'),error=document.getElementById('error');if(!go||!box)return;let timer=null,step=0;const stages=[['Analyse des photos…','Lecture des informations visibles',18],['Extraction des données…','Identification du véhicule, du prix et du kilométrage',38],['Vérification…','Contrôle des informations détectées',58],['Recherche du marché…','Recherche de véhicules réellement comparables',78],['Finalisation…','Préparation du résultat',92]];function setStage(i){const s=stages[Math.min(i,stages.length-1)];title.textContent=s[0];note.textContent=s[1];bar.style.width=s[2]+'%';}function start(){if(!go||go.disabled)return;box.classList.add('active');step=0;setStage(0);clearInterval(timer);timer=setInterval(()=>{if(step<stages.length-1){step++;setStage(step)}},1800)}function finish(){clearInterval(timer);bar.style.width='100%';title.textContent='Analyse terminée';note.textContent='Résultat prêt';setTimeout(()=>box.classList.remove('active'),500)}document.addEventListener('click',e=>{if(e.target===go){setTimeout(start,0)}},true);new MutationObserver(()=>{if(error&&error.textContent.trim()){box.classList.remove('active');clearInterval(timer)}const market=document.getElementById('market');if(market&&!market.hidden&&market.innerText.trim())finish()}).observe(document.body,{subtree:true,childList:true,characterData:true});})();</script></body>`);
         rawHtmlSend(res, up.statusCode || 200, html);
         return;
       }
