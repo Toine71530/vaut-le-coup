@@ -97,7 +97,7 @@ app.post("/api/market", async (req, res) => {
     const q = p => prices[Math.max(0, Math.min(prices.length - 1, Math.floor((prices.length - 1) * p)))];
     const asking = Number(v.price_eur);
     const gapPct = asking > 0 ? ((median - asking) / median) * 100 : null;
-    const dealScore = gapPct == null ? null : Math.max(0, Math.min(100, Math.round(50 + gapPct * 2.5)));
+    const dealScore = gapPct == null ? null : Math.min(prices.length < 10 ? 90 : 100, Math.max(0, Math.round(50 + gapPct * 2.5)));
     res.json({ ok: true, comparables: prices.length, market_median_eur: Math.round(median), low_eur: Math.round(q(0.15)), high_eur: Math.round(q(0.85)), asking_price_eur: Number.isFinite(asking) ? asking : null, gap_eur: Number.isFinite(asking) ? Math.round(median - asking) : null, gap_pct: gapPct == null ? null : Math.round(gapPct * 10) / 10, deal_score: dealScore, sample: listings.slice(0, 8).map(x => ({ price:x.price, year:x.year, mileage:x.mileage, energy:x.energy, gearbox:x.gearbox, horsepower:x.horsepower, seller_type:x.seller_type, source:x.source, source_url:x.source_url })) });
   } catch (e) { console.error(e); res.status(500).json({ error: e.message || "Erreur marché." }); }
 });
