@@ -1,4 +1,4 @@
-name: Patch UI improvements
+name: Apply final UI improvements
 
 on:
   push:
@@ -12,174 +12,193 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Apply UI improvements
+
+      - name: Patch server UI
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
+
           p = Path('server.js')
           s = p.read_text()
 
-          def replace_once(old, new, name):
-              global s
-              if old not in s:
-                  raise SystemExit(f'{name} marker not found')
+          # 1) Three thumbnails always on one row, including mobile.
+          s = re.sub(
+              r'\.previews \{.*?\n\}',
+              '''.previews {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 12px;
+          }''', s, count=1, flags=re.S)
+          s = re.sub(
+              r'\.thumb \{.*?\n\}',
+              '''.thumb {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 1 / 1;
+            min-width: 0;
+          }''', s, count=1, flags=re.S)
+
+          # 2) Progress bar: real stage changes, not a fake timer.
+          progress_css = '''
+.progress-wrap {
+  margin-top: 14px;
+}
+
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.progress-track {
+  width: 100%;
+  height: 14px;
+  background: #e3e7eb;
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  width: 0%;
+  height: 100%;
+  background: #4386d9;
+  border-radius: 99px;
+  transition: width .35s ease, background .35s ease;
+}
+'''
+          if '.progress-wrap {' not in s:
+              s = s.replace('\n</style>', progress_css + '\n</style>', 1)
+
+          # 3) Reading confidence helpers.
+          if 'function readingConfidence(vehicle)' not in s:
+              marker = 'function showAnalysis(vehicle) {'
+              helper = '''function readingConfidence(vehicle) {
+            const raw = Number(vehicle?.confidence);
+            const aiScore = Number.isFinite(raw) ? (raw <= 1 ? raw * 100 : raw) : 0;
+            const essential = [vehicle?.make, vehicle?.model, vehicle?.year, vehicle?.mileage_km, vehicle?.price_eur, vehicle?.energy, vehicle?.gearbox];
+            const completeness = essential.filter((v) => v !== null && v !== undefined && v !== '').length / essential.length * 100;
+            return Math.max(0, Math.min(100, Math.round(aiScore * 0.7 + completeness * 0.3)));
+          }
+
+          function confidenceTone(score) {
+            if (score >= 85) return 'confidence-good';
+            if (score >= 65) return 'confidence-ok';
+            if (score >= 40) return 'confidence-caution';
+            return 'confidence-low';
+          }
+
+          function marketTone(label) {
+            const value = String(label || '').toLowerCase();
+            if (value.includes('très intéressant') || value.includes('plutôt intéressant')) return 'verdict-green';
+            if (value.includes('dans le marché')) return 'verdict-blue';
+            if (value.includes('cher')) return 'verdict-red';
+            return 'verdict-orange';
+          }
+
+          '''
+              s = s.replace(marker, helper + marker, 1)
+
+          # 4) Confidence display.
+          s = re.sub(
+              r'<p class="score">\s*"Confiance de lecture : " \+\s*escapeHtml\(vehicle\.confidence \?\? 0\) \+\s*"/100</p>" \+',
+              ''''<p class="score confidence-pill ' + confidenceTone(readingConfidence(vehicle)) + '">' +
+              "🔎 Fiabilité des informations extraites : " + readingConfidence(vehicle) + "/100</p>" +
+              '<p class="muted">Score indicatif de qualité de lecture. Il ne mesure pas l’état du véhicule.</p>' +''',
+              s, count=1, flags=re.S)
+
+          # 5) Market verdict colors and negotiation advice.
+          if 'const negotiationAdvice =' not in s:
+              marker = '  const comparables =\n    marketData.comparables || [];'
+              insert = '''  const comparables =
+            marketData.comparables || [];
+
+          const tone = marketTone(marketData.label);
+          const verdictEmoji = tone === 'verdict-green' ? '🟢' : tone === 'verdict-blue' ? '🔵' : tone === 'verdict-red' ? '🔴' : '🟠';
+          const negotiationAdvice = comparables.length >= 3
+            ? "Appuyez-vous sur les comparables compatibles pour négocier. Vérifiez entretien, contrôle technique, factures, pneus, freins et les frais à venir. Si le prix demandé est au-dessus du marché, utilisez ces éléments pour fixer une offre de départ réaliste."
+            : "Les comparables sont trop limités pour fixer une négociation précise. Vérifiez l’historique, le contrôle technique et les principaux frais à venir ; chaque défaut réel ou entretien imminent peut devenir un argument concret.";'''
+              s = s.replace(marker, insert, 1)
+
+          # Replace the first market status opening with a colored verdict header.
+          if '<div class="verdict-title">' not in s:
+              old = '''    '<div class="status">' +\n\n    "<b>" +\n    escapeHtml(marketData.label) +\n    "</b>" +'''
+              new = '''    '<div class="status verdict ' + tone + '">' +
+    '<div class="verdict-title">' + verdictEmoji + ' ' + escapeHtml(marketData.label || 'Résultat') + '</div>' +'''
               s = s.replace(old, new, 1)
 
-          replace_once('''function showAnalysis(vehicle) {''', '''function readingConfidence(vehicle) {
-  const raw = Number(vehicle?.confidence);
-  const aiScore = Number.isFinite(raw)
-    ? (raw <= 1 ? raw * 100 : raw)
-    : 0;
+          # Add negotiation block before comparables.
+          if 'Axes d’amélioration / négociation' not in s:
+              s = s.replace(
+                  '    "<h3>Comparables utilisés</h3>" +',
+                  '''    '<div class="result"><h3>💬 Axes d’amélioration / négociation</h3><p>' + escapeHtml(negotiationAdvice) + '</p></div>' +
 
-  const essential = [
-    vehicle?.make,
-    vehicle?.model,
-    vehicle?.year,
-    vehicle?.mileage_km,
-    vehicle?.price_eur,
-    vehicle?.energy,
-    vehicle?.gearbox
-  ];
+    '<h3>📊 Comparables utilisés</h3>' +''', 1)
 
-  const completeness =
-    essential.filter((v) => v !== null && v !== undefined && v !== '').length /
-    essential.length * 100;
+          # Color CSS.
+          if '.verdict-green {' not in s:
+              css = '''
+.verdict { border: 3px solid transparent; }
+.verdict-title { font-size: 27px; font-weight: 900; margin-bottom: 14px; }
+.verdict-green { background: #e8f7ed; border-color: #2e9d59; }
+.verdict-blue { background: #e9f2ff; border-color: #4386d9; }
+.verdict-orange { background: #fff3df; border-color: #e6a33a; }
+.verdict-red { background: #ffe7e7; border-color: #d94b4b; }
+.confidence-pill { border-radius: 16px; padding: 12px 15px; }
+.confidence-good { background: #e8f7ed; color: #176b39; }
+.confidence-ok { background: #e9f2ff; color: #245b98; }
+.confidence-caution { background: #fff3df; color: #8a5b13; }
+.confidence-low { background: #ffe7e7; color: #9b2929; }
+'''
+              s = s.replace('\n</style>', css + '\n</style>', 1)
 
-  const score = Math.round(aiScore * 0.7 + completeness * 0.3);
-  return Math.max(0, Math.min(100, score));
-}
+          # 6) Progress UI and stage updates.
+          if 'function setProgress(value, label)' not in s:
+              marker = 'function showAnalysis(vehicle) {'
+              helper = '''function setProgress(value, label) {
+            const bar = document.getElementById('progressBar');
+            const pct = document.getElementById('progressPct');
+            const text = document.getElementById('progressText');
+            if (!bar || !pct || !text) return;
+            bar.style.width = Math.max(0, Math.min(100, value)) + '%';
+            pct.textContent = Math.round(value) + '%';
+            text.textContent = label;
+            bar.style.background = value >= 100 ? '#2e9d59' : value >= 60 ? '#e6a33a' : '#4386d9';
+          }
 
-function confidenceTone(score) {
-  if (score >= 85) return 'confidence-good';
-  if (score >= 65) return 'confidence-ok';
-  if (score >= 40) return 'confidence-caution';
-  return 'confidence-low';
-}
+          '''
+              s = s.replace(marker, helper + marker, 1)
 
-function marketTone(label) {
-  const value = String(label || '').toLowerCase();
-  if (value.includes('très intéressant') || value.includes('plutôt intéressant')) return 'verdict-green';
-  if (value.includes('dans le marché')) return 'verdict-blue';
-  if (value.includes('cher')) return 'verdict-red';
-  return 'verdict-orange';
-}
+          s = s.replace(
+              ''''<div class="status">Analyse des photos…</div>''',
+              ''''<div class="status"><b>Analyse en cours</b><div class="progress-wrap"><div class="progress-label"><span id="progressText">Préparation des photos…</span><span id="progressPct">5%</span></div><div class="progress-track"><div id="progressBar" class="progress-bar" style="width:5%"></div></div></div></div>''', 1)
 
-function showAnalysis(vehicle) {''', 'confidence helpers')
+          s = s.replace(
+              '''    showAnalysis(\n      analysisJson.vehicle\n    );''',
+              '''    setProgress(55, "Lecture des informations terminée");
 
-          replace_once('''    '<p class="score">' +
-    "Confiance de lecture : " +
-    readingConfidence(vehicle) +
-    "/100</p>" +''', '''    '<p class="score confidence-pill ' + confidenceTone(readingConfidence(vehicle)) + '">' +
-    "🔎 Confiance de lecture : " +
-    readingConfidence(vehicle) +
-    "/100</p>" +''', 'confidence display')
+    showAnalysis(
+      analysisJson.vehicle
+    );''', 1)
 
-          replace_once('''  const comparables =
-    marketData.comparables || [];
+          s = s.replace(
+              ''''<div class="status">Recherche des comparables…</div>''',
+              ''''<div class="status"><b>Recherche des comparables</b><div class="progress-wrap"><div class="progress-label"><span id="progressText">Recherche du marché…</span><span id="progressPct">60%</span></div><div class="progress-track"><div id="progressBar" class="progress-bar" style="width:60%;background:#e6a33a"></div></div></div></div>''', 1)
 
-  const negotiationAdvice =''', '''  const comparables =
-    marketData.comparables || [];
-
-  const tone = marketTone(marketData.label);
-  const verdictEmoji =
-    tone === 'verdict-green' ? '🟢' :
-    tone === 'verdict-blue' ? '🔵' :
-    tone === 'verdict-red' ? '🔴' : '🟠';
-
-  const negotiationAdvice =''', 'market tone')
-
-          replace_once('''    '<div class="status">' +''', '''    '<div class="status verdict ' + tone + '">' +
-
-    '<div class="verdict-title">' +
-    verdictEmoji + ' ' +
-    escapeHtml(marketData.label || 'Résultat') +
-    '</div>' +''', 'market verdict block')
-
-          replace_once('''    "<b>" +
-    escapeHtml(marketData.label) +
-    "</b>" +
-
-    "<p>" +''', '''    "<p>" +''', 'duplicate market label')
-
-          replace_once('''    "<h3>Comparables utilisés</h3>" +''', '''    '<div class="result"><h3>💬 Axes d’amélioration / négociation</h3><p>' +
-    escapeHtml(negotiationAdvice) +
-    "</p></div>" +
-
-    '<h3>📊 Comparables utilisés</h3>' +''', 'negotiation heading')
-
-          replace_once('''.tag {
-  display: inline-block;
-  background: #e9edf1;
-  border-radius: 99px;
-  padding: 5px 10px;
-  margin: 3px 4px 3px 0;
-}
-''', '''.tag {
-  display: inline-block;
-  background: #e9edf1;
-  border-radius: 99px;
-  padding: 5px 10px;
-  margin: 3px 4px 3px 0;
-}
-
-.verdict {
-  border: 3px solid transparent;
-}
-
-.verdict-title {
-  font-size: 27px;
-  font-weight: 900;
-  margin-bottom: 14px;
-}
-
-.verdict-green {
-  background: #e8f7ed;
-  border-color: #2e9d59;
-}
-
-.verdict-blue {
-  background: #e9f2ff;
-  border-color: #4386d9;
-}
-
-.verdict-orange {
-  background: #fff3df;
-  border-color: #e6a33a;
-}
-
-.verdict-red {
-  background: #ffe7e7;
-  border-color: #d94b4b;
-}
-
-.confidence-pill {
-  border-radius: 16px;
-  padding: 12px 15px;
-}
-
-.confidence-good {
-  background: #e8f7ed;
-  color: #176b39;
-}
-
-.confidence-ok {
-  background: #e9f2ff;
-  color: #245b98;
-}
-
-.confidence-caution {
-  background: #fff3df;
-  color: #8a5b13;
-}
-
-.confidence-low {
-  background: #ffe7e7;
-  color: #9b2929;
-}
-''', 'color css')
+          s = s.replace(
+              '''    showMarket(marketJson);''',
+              '''    setProgress(100, "Analyse terminée");
+    showMarket(marketJson);''', 1)
 
           p.write_text(s)
           PY
+
+      - name: Validate JavaScript syntax
+        run: node --check server.js
+
       - name: Commit patched file
         run: |
           if git diff --quiet; then
@@ -188,6 +207,6 @@ function showAnalysis(vehicle) {''', 'confidence helpers')
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add server.js
-          git commit -m "Add color coded verdicts and quick signals"
+          git add server.js .github/workflows/patch-ui.yml
+          git commit -m "Finalize useful UI signals and progress"
           git push
