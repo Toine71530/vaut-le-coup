@@ -4,8 +4,11 @@ import multer from "multer";
 import OpenAI from "openai";
 
 const app = express();
-
 const PORT = process.env.PORT || 10000;
+
+/* =========================================================
+   UPLOAD
+========================================================= */
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -17,6 +20,10 @@ const upload = multer({
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
+
+/* =========================================================
+   OPENAI
+========================================================= */
 
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({
@@ -52,6 +59,49 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function formatEuro(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(Number(value))
+  ) {
+    return "Non déterminé";
+  }
+
+  return new Intl.NumberFormat("fr-FR", {
+    style: "currency",
+    currency: "EUR",
+    maximumFractionDigits: 0
+  }).format(Number(value));
+}
+
+function formatKm(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(Number(value))
+  ) {
+    return "Non déterminé";
+  }
+
+  return (
+    new Intl.NumberFormat("fr-FR").format(Number(value)) +
+    " km"
+  );
+}
+
+function formatSeller(value) {
+  if (value === "professional") {
+    return "Professionnel";
+  }
+
+  if (value === "private") {
+    return "Particulier";
+  }
+
+  return null;
 }
 
 /* =========================================================
@@ -109,20 +159,32 @@ Analyse une annonce automobile à partir de 1 à 3 photos.
 
 IMPORTANT :
 
-- Analyse uniquement ce qui est réellement visible.
-- Croise les informations présentes sur les différentes photos.
-- Une photo peut montrer le texte de l'annonce et une autre le véhicule.
-- N'invente jamais une information absente.
-- Si une information est absente, illisible ou ambiguë : null.
-- Ne déduis pas une finition ou une puissance simplement parce qu'elle semble probable.
-- Signale les contradictions entre les photos.
-- Observe les défauts extérieurs réellement visibles.
-- Ne prétends jamais avoir vérifié l'historique réel.
-- Ne prétends jamais avoir vérifié le kilométrage réel.
-- Ne prétends jamais avoir vérifié le marché automobile.
-- Les informations telles que "1ère main", "entretien Toyota",
-  "batterie 100 %" ou "garantie" sont des affirmations de l'annonce
-  et ne doivent pas être présentées comme vérifiées.
+1. Analyse uniquement ce qui est réellement visible.
+2. Croise les informations entre toutes les photos.
+3. Les photos peuvent avoir des rôles différents :
+   - capture d'écran de l'annonce
+   - caractéristiques du véhicule
+   - photo extérieure du véhicule
+   - informations d'entretien
+   - informations administratives
+4. Ne force jamais un rôle particulier à une photo.
+5. N'invente aucune information.
+6. Si une information est absente, illisible ou ambiguë : null.
+7. Ne déduis pas une finition simplement parce qu'elle semble probable.
+8. Ne déduis pas la puissance simplement parce qu'elle semble probable.
+9. Signale les contradictions entre les photos.
+10. Observe les défauts extérieurs réellement visibles.
+11. Ne prétends jamais avoir vérifié l'historique réel.
+12. Ne prétends jamais avoir vérifié le kilométrage réel.
+13. Ne prétends jamais avoir vérifié le marché automobile.
+14. Les mentions "1ère main", "entretien constructeur",
+    "batterie 100 %", "garantie", etc. sont des AFFIRMATIONS
+    visibles dans l'annonce et non des faits vérifiés.
+15. Si une photo permet de lire une information avec certitude,
+    utilise-la même si elle n'est pas présente sur les autres photos.
+16. Si deux photos donnent des informations différentes,
+    conserve l'information la plus lisible et signale
+    la contradiction dans warnings.
 
 Retourne UNIQUEMENT un objet JSON valide :
 
@@ -159,7 +221,7 @@ warnings :
 - contradictions entre les photos
 - défauts visibles
 - incohérences
-- points importants à vérifier avant achat.
+- informations importantes à vérifier avant achat.
 
 Ne donne aucune explication en dehors du JSON.
 `;
@@ -219,8 +281,7 @@ app.post("/api/market", async (req, res) => {
 
     if (!key) {
       return res.status(503).json({
-        error:
-          "CARHUNT_API_KEY manquante."
+        error: "CARHUNT_API_KEY manquante."
       });
     }
 
@@ -228,14 +289,20 @@ app.post("/api/market", async (req, res) => {
 
     if (!v.make || !v.model) {
       return res.status(400).json({
-        error:
-          "Marque et modèle nécessaires."
+        error: "Marque et modèle nécessaires."
       });
     }
 
     const make = String(v.make)
       .toUpperCase()
       .trim();
+
+    /*
+      On retire une éventuelle génération finale :
+      Prius 5 -> PRIUS
+      Golf VIII -> GOLF
+      208 II -> 208
+    */
 
     const model = String(v.model)
       .toUpperCase()
@@ -246,9 +313,9 @@ app.post("/api/market", async (req, res) => {
     const targetMileage = Number(v.mileage_km);
     const asking = Number(v.price_eur);
 
-    /* -------------------------------------------------------
-       Recherche CarHunt
-    ------------------------------------------------------- */
+    /* =====================================================
+       RECHERCHE CARHUNT
+    ===================================================== */
 
     async function searchCarHunt(withYear) {
       const params = new URLSearchParams();
@@ -273,36 +340,31 @@ app.post("/api/market", async (req, res) => {
 
       const response = await fetch(url, {
         headers: {
-          Authorization:
-            "Bearer " + key
+          Authorization: "Bearer " + key
         }
       });
 
       if (!response.ok) {
-        const detail =
-          await response.text();
+        const detail = await response.text();
 
         throw new Error(
           "CarHunt HTTP " +
-            response.status +
-            ": " +
-            detail
+          response.status +
+          ": " +
+          detail
         );
       }
 
-      const data =
-        await response.json();
+      const data = await response.json();
 
-      return Array.isArray(
-        data.listings
-      )
+      return Array.isArray(data.listings)
         ? data.listings
         : [];
     }
 
-    /* -------------------------------------------------------
-       Filtrage local
-    ------------------------------------------------------- */
+    /* =====================================================
+       FILTRAGE LOCAL
+    ===================================================== */
 
     function filterListings(
       listings,
@@ -323,9 +385,7 @@ app.post("/api/market", async (req, res) => {
         if (
           Number.isFinite(targetYear) &&
           Number.isFinite(year) &&
-          Math.abs(
-            year - targetYear
-          ) > 1
+          Math.abs(year - targetYear) > 1
         ) {
           return false;
         }
@@ -340,8 +400,10 @@ app.post("/api/market", async (req, res) => {
           return false;
         }
 
-        /* Exclure l'annonce elle-même
-           lorsqu'elle correspond exactement. */
+        /*
+          On évite de compter l'annonce analysée
+          si elle apparaît elle-même dans CarHunt.
+        */
 
         if (
           Number.isFinite(asking) &&
@@ -358,10 +420,11 @@ app.post("/api/market", async (req, res) => {
       });
     }
 
-    /* -------------------------------------------------------
+    /* =====================================================
        NIVEAU 1
-       Année ±1 / kilométrage ±30 000
-    ------------------------------------------------------- */
+       Année ±1
+       Kilométrage ±30 000
+    ===================================================== */
 
     let rawListings =
       await searchCarHunt(true);
@@ -372,10 +435,11 @@ app.post("/api/market", async (req, res) => {
         30000
       );
 
-    /* -------------------------------------------------------
+    /* =====================================================
        NIVEAU 2
-       Année ±1 / kilométrage ±60 000
-    ------------------------------------------------------- */
+       Même année ±1
+       Kilométrage ±60 000
+    ===================================================== */
 
     if (listings.length < 5) {
       listings =
@@ -385,10 +449,11 @@ app.post("/api/market", async (req, res) => {
         );
     }
 
-    /* -------------------------------------------------------
+    /* =====================================================
        NIVEAU 3
-       Nouvelle recherche sans filtre année CarHunt
-    ------------------------------------------------------- */
+       Recherche sans année
+       puis filtrage local
+    ===================================================== */
 
     if (listings.length < 5) {
       const widerListings =
@@ -407,41 +472,37 @@ app.post("/api/market", async (req, res) => {
 
       const seen = new Set();
 
-      listings = combined.filter(
-        (x) => {
-          const id =
-            x.id ??
-            [
-              x.make,
-              x.model,
-              x.year,
-              x.mileage,
-              x.price,
-              x.source_url
-            ].join("|");
+      listings = combined.filter((x) => {
+        const id =
+          x.id ??
+          [
+            x.make,
+            x.model,
+            x.year,
+            x.mileage,
+            x.price,
+            x.source_url
+          ].join("|");
 
-          if (seen.has(id)) {
-            return false;
-          }
-
-          seen.add(id);
-          return true;
+        if (seen.has(id)) {
+          return false;
         }
-      );
+
+        seen.add(id);
+        return true;
+      });
     }
 
-    /* -------------------------------------------------------
-       Trier par proximité
-    ------------------------------------------------------- */
+    /* =====================================================
+       TRI PAR PROXIMITÉ
+    ===================================================== */
 
     listings.sort((a, b) => {
       const yearA = Number(a.year);
       const yearB = Number(b.year);
 
-      const mileageA =
-        Number(a.mileage);
-      const mileageB =
-        Number(b.mileage);
+      const mileageA = Number(a.mileage);
+      const mileageB = Number(b.mileage);
 
       const yearDistanceA =
         Number.isFinite(targetYear) &&
@@ -463,8 +524,7 @@ app.post("/api/market", async (req, res) => {
         Number.isFinite(targetMileage) &&
         Number.isFinite(mileageA)
           ? Math.abs(
-              mileageA -
-                targetMileage
+              mileageA - targetMileage
             )
           : 0;
 
@@ -472,8 +532,7 @@ app.post("/api/market", async (req, res) => {
         Number.isFinite(targetMileage) &&
         Number.isFinite(mileageB)
           ? Math.abs(
-              mileageB -
-                targetMileage
+              mileageB - targetMileage
             )
           : 0;
 
@@ -485,15 +544,13 @@ app.post("/api/market", async (req, res) => {
       );
     });
 
-    /* -------------------------------------------------------
-       Prix
-    ------------------------------------------------------- */
+    /* =====================================================
+       PRIX
+    ===================================================== */
 
     const prices =
       listings
-        .map((x) =>
-          Number(x.price)
-        )
+        .map((x) => Number(x.price))
         .filter(
           (p) =>
             Number.isFinite(p) &&
@@ -503,9 +560,9 @@ app.post("/api/market", async (req, res) => {
           (a, b) => a - b
         );
 
-    /* -------------------------------------------------------
-       Confiance marché
-    ------------------------------------------------------- */
+    /* =====================================================
+       CONFIANCE MARCHÉ
+    ===================================================== */
 
     let marketConfidence = 0;
 
@@ -523,53 +580,40 @@ app.post("/api/market", async (req, res) => {
       marketConfidence = 20;
     }
 
-    /* -------------------------------------------------------
-       Moins de 3 comparables
-    ------------------------------------------------------- */
+    /* =====================================================
+       MOINS DE 3 COMPARABLES
+    ===================================================== */
 
     if (prices.length < 3) {
       return res.json({
         ok: true,
-        comparables:
-          prices.length,
-
-        market_confidence:
-          marketConfidence,
+        comparables: prices.length,
+        market_confidence: marketConfidence,
 
         market_status:
-          "Très peu de données : estimation non fiable.",
+          "Pas assez de données comparables pour conclure de manière fiable.",
 
-        market_median_eur:
-          null,
-
-        low_eur:
-          null,
-
-        high_eur:
-          null,
+        market_median_eur: null,
+        low_eur: null,
+        high_eur: null,
 
         asking_price_eur:
           Number.isFinite(asking)
             ? asking
             : null,
 
-        gap_eur:
-          null,
-
-        gap_pct:
-          null,
-
-        deal_score:
-          null,
+        gap_eur: null,
+        gap_pct: null,
+        deal_score: null,
 
         sample:
           listings.slice(0, 8)
       });
     }
 
-    /* -------------------------------------------------------
-       Statistiques
-    ------------------------------------------------------- */
+    /* =====================================================
+       MÉDIANE
+    ===================================================== */
 
     const median =
       prices[
@@ -581,8 +625,7 @@ app.post("/api/market", async (req, res) => {
     function percentile(p) {
       const index =
         Math.floor(
-          (prices.length - 1) *
-            p
+          (prices.length - 1) * p
         );
 
       return prices[
@@ -602,6 +645,10 @@ app.post("/api/market", async (req, res) => {
     const high =
       percentile(0.85);
 
+    /* =====================================================
+       ÉCART AU MARCHÉ
+    ===================================================== */
+
     const gapPct =
       Number.isFinite(asking) &&
       asking > 0 &&
@@ -618,10 +665,10 @@ app.post("/api/market", async (req, res) => {
           )
         : null;
 
-    /* -------------------------------------------------------
-       Score
-       Pas de score sous 5 comparables.
-    ------------------------------------------------------- */
+    /* =====================================================
+       SCORE
+       Aucun score sous 5 comparables.
+    ===================================================== */
 
     let dealScore = null;
 
@@ -638,15 +685,15 @@ app.post("/api/market", async (req, res) => {
             0,
             Math.round(
               50 +
-                gapPct * 2.5
+              gapPct * 2.5
             )
           )
         );
     }
 
-    /* -------------------------------------------------------
-       Statut humain
-    ------------------------------------------------------- */
+    /* =====================================================
+       STATUT
+    ===================================================== */
 
     let marketStatus;
 
@@ -661,9 +708,9 @@ app.post("/api/market", async (req, res) => {
         "Comparaison marché suffisamment documentée.";
     }
 
-    /* -------------------------------------------------------
-       Réponse
-    ------------------------------------------------------- */
+    /* =====================================================
+       RÉPONSE
+    ===================================================== */
 
     res.json({
       ok: true,
@@ -751,6 +798,7 @@ app.post("/api/market", async (req, res) => {
               x.source_url ?? null
           }))
     });
+
   } catch (e) {
     console.error(e);
 
@@ -769,10 +817,12 @@ app.post("/api/market", async (req, res) => {
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
+
     vision:
       Boolean(
         process.env.OPENAI_API_KEY
       ),
+
     market:
       Boolean(
         process.env.CARHUNT_API_KEY
@@ -786,6 +836,7 @@ app.get("/api/health", (_req, res) => {
 
 const HTML = `
 <!doctype html>
+
 <html lang="fr">
 
 <head>
@@ -906,26 +957,35 @@ input[type="file"] {
   position: absolute;
   top: 5px;
   right: 5px;
+
   width: 32px;
   height: 32px;
+
   border-radius: 50%;
   border: 0;
+
   background: #17202a;
   color: white;
+
   font-size: 20px;
   cursor: pointer;
 }
 
 button.primary {
   width: 100%;
+
   margin-top: 16px;
   padding: 16px;
+
   border: 0;
   border-radius: 14px;
+
   background: #17202a;
   color: white;
+
   font-size: 18px;
   font-weight: 800;
+
   cursor: pointer;
 }
 
@@ -936,8 +996,11 @@ button.primary:disabled {
 
 .status {
   margin-top: 15px;
+
   padding: 14px;
+
   border-radius: 14px;
+
   background: #eef1f3;
 }
 
@@ -947,9 +1010,13 @@ button.primary:disabled {
 
 .confidence {
   display: inline-block;
+
   background: #eef1f3;
+
   border-radius: 999px;
+
   padding: 9px 14px;
+
   margin-bottom: 18px;
 }
 
@@ -976,20 +1043,27 @@ button.primary:disabled {
 
 .pill {
   background: #eef2f4;
+
   border-radius: 999px;
+
   padding: 9px 13px;
 }
 
 .warning {
   background: #fff3dc;
+
   border-radius: 14px;
+
   padding: 14px;
+
   margin: 10px 0;
 }
 
 .market {
   background: #f8fafb;
+
   border-radius: 16px;
+
   padding: 16px;
 }
 
@@ -1014,10 +1088,17 @@ button.primary:disabled {
   border-bottom: 1px solid #e2e6e9;
 }
 
+.comparable a {
+  color: inherit;
+}
+
 .error {
   background: #ffe7e7;
+
   color: #9d2020;
+
   padding: 14px;
+
   border-radius: 14px;
 }
 
@@ -1128,10 +1209,14 @@ fileInput.addEventListener(
         fileInput.files || []
       );
 
-    files =
-      files
-        .concat(selected)
-        .slice(0, 3);
+    for (const file of selected) {
+
+      if (files.length >= 3) {
+        break;
+      }
+
+      files.push(file);
+    }
 
     fileInput.value = "";
 
@@ -1139,6 +1224,10 @@ fileInput.addEventListener(
 
   }
 );
+
+/* =========================================================
+   APERÇU PHOTOS
+========================================================= */
 
 function renderPreviews() {
 
@@ -1156,8 +1245,18 @@ function renderPreviews() {
       const img =
         document.createElement("img");
 
-      img.src =
+      const objectUrl =
         URL.createObjectURL(file);
+
+      img.src =
+        objectUrl;
+
+      img.onload =
+        function () {
+          URL.revokeObjectURL(
+            objectUrl
+          );
+        };
 
       const remove =
         document.createElement("button");
@@ -1174,7 +1273,10 @@ function renderPreviews() {
       remove.onclick =
         function () {
 
-          files.splice(index, 1);
+          files.splice(
+            index,
+            1
+          );
 
           renderPreviews();
 
@@ -1205,11 +1307,11 @@ analyzeButton.addEventListener(
       return;
     }
 
-    analyzeButton.disabled = true;
+    analyzeButton.disabled =
+      true;
 
-    statusBox.classList.remove(
-      "hidden"
-    );
+    statusBox.className =
+      "status";
 
     statusBox.textContent =
       "🔎 Analyse des photos en cours…";
@@ -1223,10 +1325,12 @@ analyzeButton.addEventListener(
 
       files.forEach(
         function (file) {
+
           formData.append(
             "images",
             file
           );
+
         }
       );
 
@@ -1323,8 +1427,16 @@ function renderVehicle(v) {
     ["Prix", formatEuro(v.price_eur)],
     ["Énergie", v.energy],
     ["Boîte", v.gearbox],
-    ["Puissance", v.power_hp ? v.power_hp + " ch" : null],
-    ["Vendeur", formatSeller(v.seller_type)],
+    [
+      "Puissance",
+      v.power_hp
+        ? v.power_hp + " ch"
+        : null
+    ],
+    [
+      "Vendeur",
+      formatSeller(v.seller_type)
+    ],
     ["Lieu", v.location]
   ];
 
@@ -1409,6 +1521,7 @@ function renderVehicle(v) {
     );
 
     card.appendChild(pills);
+
   }
 
   const warnings = [];
@@ -1427,6 +1540,7 @@ function renderVehicle(v) {
 
       }
     );
+
   }
 
   if (
@@ -1442,6 +1556,7 @@ function renderVehicle(v) {
 
       }
     );
+
   }
 
   if (warnings.length) {
@@ -1471,6 +1586,7 @@ function renderVehicle(v) {
 
       }
     );
+
   }
 
   result.appendChild(card);
@@ -1490,7 +1606,9 @@ async function loadMarket(v) {
 
   card.innerHTML =
     "<h2>Est-ce que ça vaut le coup ?</h2>" +
-    "<div class='market'>Recherche des comparables…</div>";
+    "<div class='market'>" +
+    "Recherche des comparables…" +
+    "</div>";
 
   result.appendChild(card);
 
@@ -1501,22 +1619,29 @@ async function loadMarket(v) {
         "/api/market",
         {
           method: "POST",
+
           headers: {
             "Content-Type":
               "application/json"
           },
-          body: JSON.stringify({
-            make:
-              v.make,
-            model:
-              v.model,
-            year:
-              v.year,
-            mileage_km:
-              v.mileage_km,
-            price_eur:
-              v.price_eur
-          })
+
+          body:
+            JSON.stringify({
+              make:
+                v.make,
+
+              model:
+                v.model,
+
+              year:
+                v.year,
+
+              mileage_km:
+                v.mileage_km,
+
+              price_eur:
+                v.price_eur
+            })
         }
       );
 
@@ -1547,6 +1672,10 @@ async function loadMarket(v) {
 
   }
 }
+
+/* =========================================================
+   AFFICHAGE MARCHÉ
+========================================================= */
 
 function renderMarket(
   card,
@@ -1643,20 +1772,25 @@ function renderMarket(
 
       html +=
         "<div style='margin-top:16px'>" +
-        "<div class='label'>Score bonne affaire</div>" +
+        "<div class='label'>" +
+        "Score bonne affaire" +
+        "</div>" +
         "<div class='score'>" +
         data.deal_score +
-        "/100</div>" +
+        "/100" +
+        "</div>" +
         "</div>";
 
     } else {
 
       html +=
         "<div class='warning' style='margin-top:16px'>" +
-        "⚠️ Pas assez de comparables pour attribuer un score fiable." +
+        "⚠️ Pas assez de comparables " +
+        "pour attribuer un score fiable." +
         "</div>";
 
     }
+
   }
 
   html +=
@@ -1665,6 +1799,10 @@ function renderMarket(
     data.comparables +
     "</strong> véhicule(s) comparable(s) trouvé(s)." +
     "</div>";
+
+  /* =====================================================
+     COMPARABLES
+  ===================================================== */
 
   if (
     Array.isArray(data.sample) &&
@@ -1688,27 +1826,69 @@ function renderMarket(
           "</strong>";
 
         if (x.year) {
+
           html +=
             " · " +
             escapeHtml(
               x.year
             );
+
         }
 
         if (x.mileage) {
+
           html +=
             " · " +
             formatKm(
               x.mileage
             );
+
         }
 
         if (x.energy) {
+
           html +=
             " · " +
             escapeHtml(
               x.energy
             );
+
+        }
+
+        if (x.version) {
+
+          html +=
+            "<br>" +
+            escapeHtml(
+              x.version
+            );
+
+        }
+
+        if (x.source) {
+
+          html +=
+            "<br>" +
+            "<span class='label'>" +
+            escapeHtml(
+              x.source
+            ) +
+            "</span>";
+
+        }
+
+        if (x.source_url) {
+
+          html +=
+            "<br>" +
+            "<a href='" +
+            escapeHtml(
+              x.source_url
+            ) +
+            "' target='_blank' rel='noopener'>" +
+            "Voir l'annonce" +
+            "</a>";
+
         }
 
         html +=
@@ -1716,6 +1896,7 @@ function renderMarket(
 
       }
     );
+
   }
 
   html +=
@@ -1726,60 +1907,19 @@ function renderMarket(
 }
 
 /* =========================================================
-   FORMATAGE
+   FIN
 ========================================================= */
 
-function formatEuro(value) {
+</script>
 
-  if (
-    value === null ||
-    value === undefined ||
-    !Number.isFinite(
-      Number(value)
-    )
-  ) {
-    return "Non déterminé";
-  }
+</body>
 
-  return new Intl.NumberFormat(
-    "fr-FR",
-    {
-      style: "currency",
-      currency: "EUR",
-      maximumFractionDigits: 0
-    }
-  ).format(
-    Number(value)
+</html>
+`;
+
+app.listen(PORT, () => {
+  console.log(
+    "Vaut le Coup ? démarré sur le port " +
+    PORT
   );
-}
-
-function formatKm(value) {
-
-  if (
-    value === null ||
-    value === undefined ||
-    !Number.isFinite(
-      Number(value)
-    )
-  ) {
-    return "Non déterminé";
-  }
-
-  return new Intl.NumberFormat(
-    "fr-FR"
-  ).format(
-    Number(value)
-  ) + " km";
-}
-
-function formatSeller(value) {
-
-  if (
-    value === "professional"
-  ) {
-    return "Professionnel";
-  }
-
-  if (
-    value === "private"
-  )
+});
