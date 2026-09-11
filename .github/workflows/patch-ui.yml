@@ -1,0 +1,103 @@
+name: Patch UI improvements
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply UI improvements
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('server.js')
+          s = p.read_text()
+
+          old = '''function showAnalysis(vehicle) {'''
+          new = '''function readingConfidence(vehicle) {
+  const raw = Number(vehicle?.confidence);
+  const aiScore = Number.isFinite(raw)
+    ? (raw <= 1 ? raw * 100 : raw)
+    : 0;
+
+  const essential = [
+    vehicle?.make,
+    vehicle?.model,
+    vehicle?.year,
+    vehicle?.mileage_km,
+    vehicle?.price_eur,
+    vehicle?.energy,
+    vehicle?.gearbox
+  ];
+
+  const completeness =
+    essential.filter((v) => v !== null && v !== undefined && v !== '').length /
+    essential.length * 100;
+
+  const score = Math.round(aiScore * 0.7 + completeness * 0.3);
+  return Math.max(0, Math.min(100, score));
+}
+
+function showAnalysis(vehicle) {'''
+          if old not in s:
+              raise SystemExit('showAnalysis marker not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    "Confiance de lecture : " +
+    escapeHtml(vehicle.confidence ?? 0) +
+    "/100</p>" +'''
+          new = '''    "Confiance de lecture : " +
+    readingConfidence(vehicle) +
+    "/100</p>" +
+
+    '<p class="muted">Score indicatif basé sur la présence et la cohérence des informations essentielles. Il ne mesure pas l’état du véhicule.</p>' +'''
+          if old not in s:
+              raise SystemExit('confidence display marker not found')
+          s = s.replace(old, new, 1)
+
+          old = '''  const comparables =
+    marketData.comparables || [];
+
+  market.innerHTML ='''
+          new = '''  const comparables =
+    marketData.comparables || [];
+
+  const negotiationAdvice =
+    comparables.length >= 3
+      ? "Pour négocier, appuyez-vous d’abord sur les comparables réellement compatibles. Demandez les preuves d’entretien, le contrôle technique, l’historique et les éventuels frais à prévoir (pneus, freins, distribution, révision, batterie selon le véhicule). Si le prix demandé est supérieur au niveau observé, utilisez ces éléments pour fixer une offre de départ réaliste et gardez une marge pour les frais immédiats."
+      : "Les données de marché sont encore trop limitées pour fixer un prix de négociation fiable. Avant de faire une offre, vérifiez l’historique, le contrôle technique et les factures, puis inspectez les principaux postes de dépense (pneus, freins, distribution, embrayage ou batterie selon le véhicule). Tout défaut ou entretien à venir peut devenir un argument concret pour négocier.";
+
+  market.innerHTML ='''
+          if old not in s:
+              raise SystemExit('market comparables marker not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    "<h3>Comparables utilisés</h3>" +'''
+          new = '''    '<div class="result"><h3>💬 Axes d’amélioration / négociation</h3><p>' +
+    escapeHtml(negotiationAdvice) +
+    "</p></div>" +
+
+    "<h3>Comparables utilisés</h3>" +'''
+          if old not in s:
+              raise SystemExit('comparables heading marker not found')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+      - name: Commit patched file
+        run: |
+          if git diff --quiet; then
+            echo "No changes needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.js
+          git commit -m "Improve reading confidence and buyer negotiation advice"
+          git push
