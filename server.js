@@ -418,36 +418,397 @@ app.post("/api/market", async (req, res) => {
         ? null
         : Math.min(
             prices.length < 10 ? 90 : 100,
-            Math.max(
-              0,
-              Math.round(50 + gapPct * 2.5)
-            )
-          );
+/* =========================================================
+   COMPARAISON MARCHÉ — CARHUNT
+========================================================= */
+
+app.post("/api/market", async (req, res) => {
+  try {
+    const key = process.env.CARHUNT_API_KEY;
+
+    if (!key) {
+      return res.status(503).json({
+        error: "CARHUNT_API_KEY manquante."
+      });
+    }
+
+    const v = req.body || {};
+
+    if (!v.make || !v.model) {
+      return res.status(400).json({
+        error: "Marque/modèle nécessaires."
+      });
+    }
+
+    const make = String(v.make).toUpperCase().trim();
+
+    const model = String(v.model)
+      .toUpperCase()
+      .replace(/\s+(?:[IVX]+|\d+)$/i, "")
+      .trim();
+
+    const targetYear = Number(v.year);
+    const targetMileage = Number(v.mileage_km);
+    const asking = Number(v.price_eur);
+
+    async function searchCarHunt(withYear) {
+      const params = new URLSearchParams();
+
+      params.set("make", make);
+      params.set("model", model);
+      params.set("page_size", "50");
+
+      if (withYear && Number.isFinite(targetYear)) {
+        params.set("year", String(targetYear));
+      }
+
+      const url =
+        "https://api-pro.carhunt.fr/v1/listings/search?" +
+        params.toString();
+
+      const response = await fetch(url, {
+        headers: {
+          Authorization: "Bearer " + key
+        }
+      });
+
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(
+          "CarHunt HTTP " + response.status + ": " + detail
+        );
+      }
+
+      const data = await response.json();
+
+      return Array.isArray(data.listings)
+        ? data.listings
+        : [];
+    }
+
+    function filterListings(listings, mileageTolerance) {
+      return listings.filter((x) => {
+        const price = Number(x.price);
+        const year = Number(x.year);
+        const mileage = Number(x.mileage);
+
+        if (!Number.isFinite(price) || price <= 0) {
+          return false;
+        }
+
+        if (
+          Number.isFinite(targetYear) &&
+          Number.isFinite(year) &&
+          Math.abs(year - targetYear) > 1
+        ) {
+          return false;
+        }
+
+        if (
+          Number.isFinite(targetMileage) &&
+          Number.isFinite(mileage) &&
+          Math.abs(mileage - targetMileage) > mileageTolerance
+        ) {
+          return false;
+        }
+
+        if (
+          Number.isFinite(asking) &&
+          Number.isFinite(targetYear) &&
+          Number.isFinite(targetMileage) &&
+          price === asking &&
+          year === targetYear &&
+          mileage === targetMileage
+        ) {
+          return false;
+        }
+
+        return true;
+      });
+    }
+
+    /*
+      Niveau 1 :
+      année ±1 an + kilométrage ±30 000 km
+    */
+
+    let rawListings = await searchCarHunt(true);
+
+    let listings = filterListings(
+      rawListings,
+      30000
+    );
+
+    /*
+      Niveau 2 :
+      même année approximative mais kilométrage élargi
+    */
+
+    if (listings.length < 5) {
+      listings = filterListings(
+        rawListings,
+        60000
+      );
+    }
+
+    /*
+      Niveau 3 :
+      nouvelle recherche sans filtre année côté CarHunt,
+      puis filtrage local ±1 an.
+    */
+
+    if (listings.length < 5) {
+      const widerListings = await searchCarHunt(false);
+
+      const widerFiltered = filterListings(
+        widerListings,
+        60000
+      );
+
+      const combined = [
+        ...listings,
+        ...widerFiltered
+      ];
+
+      const seen = new Set();
+
+      listings = combined.filter((x) => {
+        const id =
+          x.id ??
+          [
+            x.make,
+            x.model,
+            x.year,
+            x.mileage,
+            x.price,
+            x.source_url
+          ].join("|");
+
+        if (seen.has(id)) {
+          return false;
+        }
+
+        seen.add(id);
+        return true;
+      });
+    }
+
+    /*
+      Classement des comparables :
+      année puis kilométrage.
+    */
+
+    listings.sort((a, b) => {
+      const yearA = Number(a.year);
+      const yearB = Number(b.year);
+
+      const mileageA = Number(a.mileage);
+      const mileageB = Number(b.mileage);
+
+      const distanceA =
+        (Number.isFinite(targetYear) &&
+        Number.isFinite(yearA)
+          ? Math.abs(yearA - targetYear) * 100000
+          : 0) +
+        (Number.isFinite(targetMileage) &&
+        Number.isFinite(mileageA)
+          ? Math.abs(mileageA - targetMileage)
+          : 0);
+
+      const distanceB =
+        (Number.isFinite(targetYear) &&
+        Number.isFinite(yearB)
+          ? Math.abs(yearB - targetYear) * 100000
+          : 0) +
+        (Number.isFinite(targetMileage) &&
+        Number.isFinite(mileageB)
+          ? Math.abs(mileageB - targetMileage)
+          : 0);
+
+      return distanceA - distanceB;
+    });
+
+    const prices = listings
+      .map((x) => Number(x.price))
+      .filter(
+        (price) =>
+          Number.isFinite(price) &&
+          price > 0
+      )
+      .sort((a, b) => a - b);
+
+    /*
+      Confiance marché.
+    */
+
+    let marketConfidence = 0;
+
+    if (prices.length >= 20) {
+      marketConfidence = 95;
+    } else if (prices.length >= 12) {
+      marketConfidence = 85;
+    } else if (prices.length >= 8) {
+      marketConfidence = 75;
+    } else if (prices.length >= 5) {
+      marketConfidence = 60;
+    } else if (prices.length >= 3) {
+      marketConfidence = 40;
+    } else if (prices.length > 0) {
+      marketConfidence = 20;
+    }
+
+    /*
+      Pas assez de données pour donner
+      une fausse précision.
+    */
+
+    if (prices.length < 3) {
+      return res.json({
+        ok: true,
+        comparables: prices.length,
+        market_confidence: marketConfidence,
+        market_status:
+          "Très peu de données : estimation non fiable.",
+        market_median_eur: null,
+        low_eur: null,
+        high_eur: null,
+        asking_price_eur:
+          Number.isFinite(asking)
+            ? asking
+            : null,
+        gap_eur: null,
+        gap_pct: null,
+        deal_score: null,
+        sample: []
+      });
+    }
+
+    const median =
+      prices[Math.floor(prices.length / 2)];
+
+    function percentile(percent) {
+      const index = Math.floor(
+        (prices.length - 1) * percent
+      );
+
+      return prices[
+        Math.max(
+          0,
+          Math.min(
+            prices.length - 1,
+            index
+          )
+        )
+      ];
+    }
+
+    const low = percentile(0.15);
+    const high = percentile(0.85);
+
+    const gapPct =
+      Number.isFinite(asking) && asking > 0
+        ? ((median - asking) / median) * 100
+        : null;
+
+    const gapEur =
+      Number.isFinite(asking)
+        ? Math.round(median - asking)
+        : null;
+
+    /*
+      Score uniquement à partir de 5 comparables.
+    */
+
+    let dealScore = null;
+
+    if (
+      prices.length >= 5 &&
+      gapPct !== null
+    ) {
+      dealScore = Math.min(
+        prices.length < 10 ? 90 : 100,
+        Math.max(
+          0,
+          Math.round(50 + gapPct * 2.5)
+        )
+      );
+    }
+
+    let marketStatus;
+
+    if (prices.length < 5) {
+      marketStatus =
+        "Marché peu documenté : estimation indicative.";
+    } else if (prices.length < 8) {
+      marketStatus =
+        "Comparaison exploitable, mais échantillon limité.";
+    } else {
+      marketStatus =
+        "Comparaison marché suffisamment documentée.";
+    }
 
     res.json({
       ok: true,
+
       comparables: prices.length,
+
+      market_confidence: marketConfidence,
+
+      market_status: marketStatus,
 
       market_median_eur:
         Math.round(median),
 
       low_eur:
-        Math.round(q(0.15)),
+        Math.round(low),
 
       high_eur:
-        Math.round(q(0.85)),
+        Math.round(high),
 
       asking_price_eur:
         Number.isFinite(asking)
           ? asking
           : null,
 
-      gap_eur:
-        Number.isFinite(asking)
-          ? Math.round(median - asking)
-          : null,
+      gap_eur: gapEur,
 
       gap_pct:
+        gapPct === null
+          ? null
+          : Math.round(gapPct * 10) / 10,
+
+      deal_score: dealScore,
+
+      sample: listings
+        .slice(0, 8)
+        .map((x) => ({
+          id: x.id ?? null,
+          make: x.make ?? null,
+          model: x.model ?? null,
+          version: x.version ?? null,
+          finition: x.finition ?? null,
+          price: x.price ?? null,
+          year: x.year ?? null,
+          mileage: x.mileage ?? null,
+          energy: x.energy ?? null,
+          gearbox: x.gearbox ?? null,
+          horsepower: x.horsepower ?? null,
+          seller_type: x.seller_type ?? null,
+          source: x.source ?? null,
+          source_url: x.source_url ?? null
+        }))
+    });
+
+  } catch (e) {
+    console.error(e);
+
+    res.status(500).json({
+      error:
+        e.message ||
+        "Erreur pendant la comparaison marché."
+    });
+  }
+});
 /* =========================================================
    COMPARAISON MARCHÉ — CARHUNT
    Recherche progressive + confiance marché
