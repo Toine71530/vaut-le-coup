@@ -1438,4 +1438,120 @@ function renderMarket(m){
       direction +
       " du marché de " +
       Math.abs(m.gap_pct).toFixed(1) +
-     
+      " % (" +
+      Math.abs(m.gap_eur)
+        .toLocaleString("fr-FR") +
+      " €)";
+
+  }
+
+  barFill.style.width =
+    Math.max(
+      0,
+      Math.min(
+        100,
+        Number(m.deal_score || 0)
+      )
+    ) +
+    "%";
+
+  const sample =
+    Array.isArray(m.sample)
+      ? m.sample
+      : [];
+
+  comparables.innerHTML =
+    sample.length
+      ? sample.map(function(x){
+
+          return (
+            '<div class="comp">' +
+
+              '<span class="price">' +
+              Number(x.price)
+                .toLocaleString("fr-FR") +
+              " €" +
+              "</span>" +
+
+              " · " +
+
+              (x.year ?? "?") +
+
+              " · " +
+
+              (
+                x.mileage
+                  ? Number(x.mileage)
+                      .toLocaleString("fr-FR") +
+                    " km"
+                  : "km ?"
+              ) +
+
+              "<br>" +
+
+              '<span class="small">' +
+              escapeHtml(
+                x.source ||
+                "Source inconnue"
+              ) +
+              "</span>" +
+
+            "</div>"
+          );
+
+        }).join("")
+
+      :
+
+        '<div class="small">' +
+        "Aucun détail disponible." +
+        "</div>";
+
+}
+
+/* =========================================================
+   SÉCURITÉ HTML
+========================================================= */
+
+function escapeHtml(value){
+
+  return String(value ?? "")
+    .replace(
+      /[&<>"']/g,
+      function(character){
+
+        return {
+          "&":"&amp;",
+          "<":"&lt;",
+          ">":"&gt;",
+          '"':"&quot;",
+          "'":"&#039;"
+        }[character];
+
+      }
+    );
+
+}
+
+</script>
+
+</body>
+
+</html>`;
+
+/* =========================================================
+   DÉMARRAGE
+========================================================= */
+
+const PORT =
+  process.env.PORT || 3000;
+
+app.listen(
+  PORT,
+  () => {
+    console.log(
+      "Vaut le Coup ? — serveur démarré sur le port " +
+      PORT
+    );
+  }
+);
