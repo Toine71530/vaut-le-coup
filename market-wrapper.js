@@ -11,44 +11,45 @@ app.use(express.json({ limit: "2mb" }));
 
 const text = (v) => String(v ?? "").toUpperCase();
 
+function parseNumber(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  const s = String(v ?? "").replace(/\u00a0/g, " ").replace(/[^0-9,.-]/g, "").replace(/\.(?=\d{3}(?:\D|$))/g, "").replace(",", ".");
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
 function generation(v) {
-  const s = [v?.model, v?.version, v?.trim, v?.title, v?.name].map(text).join(" ");
-  if (/\b(?:PRIUS\s*5|PRIUS\s*V|GEN(?:ERATION)?\s*5|MK\s*5)\b/.test(s)) return 5;
-  if (/\b(?:PRIUS\s*4|PRIUS\s*IV|GEN(?:ERATION)?\s*4|MK\s*4)\b/.test(s)) return 4;
-  if (/\b(?:PRIUS\s*3|PRIUS\s*III|GEN(?:ERATION)?\s*3|MK\s*3)\b/.test(s)) return 3;
-  const year = Number(v?.year);
-  if (/\bPRIUS\b/.test(s) && Number.isFinite(year) && year >= 2023) return 5;
+  const s = [v?.model, v?.version, v?.trim, v?.title, v?.name, v?.description].map(text).join(" ");
+  if (/\b(?:PRIUS\s*(?:5|V)|GEN(?:ERATION)?\s*5|MK\s*5)\b/.test(s)) return 5;
+  if (/\b(?:PRIUS\s*(?:4|IV)|GEN(?:ERATION)?\s*4|MK\s*4)\b/.test(s)) return 4;
+  if (/\b(?:PRIUS\s*(?:3|III)|GEN(?:ERATION)?\s*3|MK\s*3)\b/.test(s)) return 3;
+  const y = parseNumber(v?.year);
+  if (/\bPRIUS\b/.test(s) && y !== null && y >= 2023) return 5;
   return null;
 }
 
 function energyKind(v) {
-  const s = [v?.energy, v?.version, v?.title, v?.name].map(text).join(" ");
-  if (/RECHARGEABLE|PHEV|PLUG.?IN|HYBRIDE\s+RECHARGEABLE/.test(s)) return "phev";
+  const s = [v?.energy, v?.version, v?.title, v?.name, v?.description].map(text).join(" ");
+  if (/RECHARGEABLE|PHEV|PLUG.?IN/.test(s)) return "phev";
   if (/HYBRIDE|HEV/.test(s)) return "hybrid";
   if (/ELECTRIQUE|\bEV\b/.test(s)) return "ev";
   return null;
 }
 
 function power(v) {
-  const direct = Number(v?.power_hp);
-  if (Number.isFinite(direct) && direct > 0) return direct;
-  const s = [v?.version, v?.title, v?.name].map(text).join(" ");
+  const direct = parseNumber(v?.power_hp ?? v?.power);
+  if (direct !== null && direct >= 100 && direct <= 1000) return direct;
+  const s = [v?.version, v?.title, v?.name, v?.description].map(text).join(" ");
   const m = s.match(/(?:^|\D)(\d{3})\s*(?:CH|HP)(?:\D|$)/);
   return m ? Number(m[1]) : null;
 }
 
-function year(v) {
-  const n = Number(v?.year);
-  return Number.isFinite(n) ? n : null;
-}
-
-function km(v) {
-  const n = Number(v?.mileage_km);
-  return Number.isFinite(n) ? n : null;
-}
+function year(v) { return parseNumber(v?.year); }
+function mileage(v) { return parseNumber(v?.mileage_km ?? v?.mileage ?? v?.mileage_display); }
+function price(v) { return parseNumber(v?.price_eur ?? v?.price ?? v?.price_display); }
 
 function isToyotaPrius(v) {
-  const s = [v?.make, v?.model, v?.version, v?.title, v?.name].map(text).join(" ");
+  const s = [v?.make, v?.model, v?.version, v?.title, v?.name, v?.description].map(text).join(" ");
   return /TOYOTA/.test(s) && /PRIUS/.test(s);
 }
 
@@ -74,7 +75,7 @@ function compatible(target, c) {
   const cy = year(c);
   if (ty && cy && Math.abs(ty - cy) > 2) return false;
 
-  return true;
+  return price(c) !== null && price(c) > 0;
 }
 
 function score(target, c) {
@@ -83,10 +84,9 @@ function score(target, c) {
   const te = energyKind(target), ce = energyKind(c);
   const tp = power(target), cp = power(c);
   const ty = year(target), cy = year(c);
-  const tk = km(target), ck = km(c);
-
-  if (tg && cg && tg === cg) s += 40;
-  if (te && ce && te === ce) s += 30;
+  const tk = mileage(target), ck = mileage(c);
+  if (tg && cg && tg === cg) s += 50;
+  if (te && ce && te === ce) s += 35;
   if (tp && cp) s += Math.max(0, 20 - Math.abs(tp - cp));
   if (ty && cy) s += Math.max(0, 10 - Math.abs(ty - cy) * 3);
   if (tk && ck) s += Math.max(0, 10 - Math.min(10, Math.abs(tk - ck) / 10000));
@@ -95,9 +95,8 @@ function score(target, c) {
 
 function median(values) {
   const a = [...values].sort((x, y) => x - y);
-  const n = a.length;
-  if (!n) return null;
-  return n % 2 ? a[(n - 1) / 2] : (a[n / 2 - 1] + a[n / 2]) / 2;
+  if (!a.length) return null;
+  return a.length % 2 ? a[(a.length - 1) / 2] : (a[a.length / 2 - 1] + a[a.length / 2]) / 2;
 }
 
 function percentile(values, p) {
@@ -109,27 +108,33 @@ function percentile(values, p) {
   return a[lo] + (a[hi] - a[lo]) * (i - lo);
 }
 
+function normalizeComparable(c) {
+  const p = price(c);
+  const km = mileage(c);
+  return {
+    ...c,
+    price_eur: p,
+    mileage_km: km,
+    price_display: p !== null ? Math.round(p).toLocaleString("fr-FR") + " €" : c.price_display,
+    mileage_display: km !== null ? Math.round(km).toLocaleString("fr-FR") + " km" : c.mileage_display
+  };
+}
+
 function targetFromBody(body) {
-  if (!body || typeof body !== "object") return body || {};
-  if (body.vehicle && typeof body.vehicle === "object") return body.vehicle;
-  if (body.target && typeof body.target === "object") return body.target;
-  if (body.analysis && typeof body.analysis === "object") return body.analysis;
-  return body;
+  return body && typeof body === "object" ? body : {};
 }
 
 function rebuild(data, target) {
   if (!data || !Array.isArray(data.comparables)) return data;
 
-  const filtered = data.comparables
-    .filter((c) => compatible(target, c))
-    .sort((a, b) => score(target, b) - score(target, a));
+  const all = data.comparables.map(normalizeComparable);
+  const filtered = all.filter((c) => compatible(target, c)).sort((a, b) => score(target, b) - score(target, a));
+  const prices = filtered.map(price).filter((n) => n !== null && n > 0);
 
-  // Do not manufacture a valuation from an insufficient sample.
-  const prices = filtered.map((c) => Number(c.price_eur)).filter((n) => Number.isFinite(n) && n > 0);
-  if (prices.length < 2) {
+  if (prices.length < 3) {
     return {
       ...data,
-      comparables: filtered,
+      comparables: filtered.slice(0, 10),
       confidence: Math.min(Number(data.confidence) || 0, 20),
       median: null,
       median_display: "Non déterminé",
@@ -146,35 +151,31 @@ function rebuild(data, target) {
   const med = median(prices);
   const low = percentile(prices, 0.15);
   const high = percentile(prices, 0.85);
-  const asking = Number(target?.price_eur ?? data.asking_price_eur);
-  const gap = Number.isFinite(asking) && med ? Math.round((asking / med - 1) * 100) : null;
+  const asking = parseNumber(target?.price_eur ?? data.asking_price_eur);
+  const gap = asking !== null && med ? Math.round((asking / med - 1) * 100) : null;
 
   return {
     ...data,
-    comparables: filtered,
+    comparables: filtered.slice(0, 10),
     median: med,
-    median_display: Number.isFinite(med) ? Math.round(med).toLocaleString("fr-FR") + " €" : "Non déterminé",
+    median_display: Math.round(med).toLocaleString("fr-FR") + " €",
     low,
     high,
-    low_display: Number.isFinite(low) ? Math.round(low).toLocaleString("fr-FR") + " €" : "Non déterminé",
-    high_display: Number.isFinite(high) ? Math.round(high).toLocaleString("fr-FR") + " €" : "Non déterminé",
-    confidence: Math.min(100, Math.max(35, 35 + prices.length * 10)),
-    gap_text: gap == null ? "Écart au marché non déterminé." : `Le prix demandé est ${Math.abs(gap)}% ${gap >= 0 ? "au-dessus" : "en-dessous"} du prix médian.`,
+    low_display: Math.round(low).toLocaleString("fr-FR") + " €",
+    high_display: Math.round(high).toLocaleString("fr-FR") + " €",
+    confidence: Math.min(95, 35 + prices.length * 10),
+    gap_text: gap === null ? "Écart au marché non déterminé." : `Le prix demandé est ${Math.abs(gap)}% ${gap >= 0 ? "au-dessus" : "en dessous"} du prix médian.`,
     warning: null,
-    label: gap == null ? "Marché comparable" : gap > 10 ? "Plutôt cher" : gap < -10 ? "Plutôt intéressant" : "Dans le marché"
+    label: gap === null ? "Marché comparable" : gap > 10 ? "Plutôt cher" : gap < -10 ? "Plutôt intéressant" : "Dans le marché"
   };
 }
 
 function proxy(req, res, bodyBuffer) {
   const headers = { ...req.headers, host: `127.0.0.1:${INTERNAL_PORT}` };
   delete headers["content-length"];
-  const payload = bodyBuffer ?? null;
-  if (payload) headers["content-length"] = Buffer.byteLength(payload);
+  if (bodyBuffer) headers["content-length"] = Buffer.byteLength(bodyBuffer);
 
-  const request = http.request(`${TARGET}${req.originalUrl}`, {
-    method: req.method,
-    headers
-  }, (upstream) => {
+  const request = http.request(`${TARGET}${req.originalUrl}`, { method: req.method, headers }, (upstream) => {
     const chunks = [];
     upstream.on("data", (c) => chunks.push(c));
     upstream.on("end", () => {
@@ -185,21 +186,24 @@ function proxy(req, res, bodyBuffer) {
           const original = JSON.parse(raw.toString("utf8"));
           const fixed = rebuild(original, targetFromBody(req.body));
           const out = Buffer.from(JSON.stringify(fixed));
-          res.status(upstream.statusCode || 200);
-          res.set("content-type", "application/json; charset=utf-8");
-          res.send(out);
+          res.status(upstream.statusCode || 200).type("json").send(out);
           return;
-        } catch {}
+        } catch (e) {
+          console.error("Market wrapper error:", e);
+        }
       }
       res.status(upstream.statusCode || 200);
       Object.entries(upstream.headers).forEach(([k, v]) => {
-        if (k.toLowerCase() !== "transfer-encoding" && v != null) res.set(k, v);
+        if (!['transfer-encoding', 'content-length'].includes(k.toLowerCase()) && v != null) res.set(k, v);
       });
       res.send(raw);
     });
   });
-  request.on("error", () => res.status(502).json({ error: "Service interne indisponible." }));
-  if (payload) request.write(payload);
+  request.on("error", (e) => {
+    console.error("Proxy error:", e);
+    res.status(502).json({ error: "Service interne indisponible." });
+  });
+  if (bodyBuffer) request.write(bodyBuffer);
   request.end();
 }
 
@@ -213,13 +217,7 @@ const child = spawn(process.execPath, ["server.js"], {
   stdio: "inherit"
 });
 
-child.on("exit", (code) => {
-  if (code && code !== 0) process.exit(code);
-});
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Market wrapper listening on ${PORT}; original server on ${INTERNAL_PORT}`);
-});
-
+child.on("exit", (code) => { if (code && code !== 0) process.exit(code); });
+app.listen(PORT, "0.0.0.0", () => console.log(`Market wrapper listening on ${PORT}; original server on ${INTERNAL_PORT}`));
 process.on("SIGTERM", () => child.kill("SIGTERM"));
 process.on("SIGINT", () => child.kill("SIGINT"));
