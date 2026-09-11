@@ -101,7 +101,7 @@ function showAnalysis(vehicle) {''', 'confidence helpers')
 
     "<p>" +''', '''    "<p>" +''', 'duplicate market label')
 
-          replace_once('''    '<h3>Comparables utilisés</h3>' +''', '''    '<div class="result"><h3>💬 Axes d’amélioration / négociation</h3><p>' +
+          replace_once('''    "<h3>Comparables utilisés</h3>" +''', '''    '<div class="result"><h3>💬 Axes d’amélioration / négociation</h3><p>' +
     escapeHtml(negotiationAdvice) +
     "</p></div>" +
 
