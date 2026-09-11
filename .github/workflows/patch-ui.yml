@@ -19,8 +19,13 @@ jobs:
           p = Path('server.js')
           s = p.read_text()
 
-          old = '''function showAnalysis(vehicle) {'''
-          new = '''function readingConfidence(vehicle) {
+          def replace_once(old, new, name):
+              global s
+              if old not in s:
+                  raise SystemExit(f'{name} marker not found')
+              s = s.replace(old, new, 1)
+
+          replace_once('''function showAnalysis(vehicle) {''', '''function readingConfidence(vehicle) {
   const raw = Number(vehicle?.confidence);
   const aiScore = Number.isFinite(raw)
     ? (raw <= 1 ? raw * 100 : raw)
@@ -44,49 +49,134 @@ jobs:
   return Math.max(0, Math.min(100, score));
 }
 
-function showAnalysis(vehicle) {'''
-          if old not in s:
-              raise SystemExit('showAnalysis marker not found')
-          s = s.replace(old, new, 1)
+function confidenceTone(score) {
+  if (score >= 85) return 'confidence-good';
+  if (score >= 65) return 'confidence-ok';
+  if (score >= 40) return 'confidence-caution';
+  return 'confidence-low';
+}
 
-          old = '''    "Confiance de lecture : " +
-    escapeHtml(vehicle.confidence ?? 0) +
-    "/100</p>" +'''
-          new = '''    "Confiance de lecture : " +
+function marketTone(label) {
+  const value = String(label || '').toLowerCase();
+  if (value.includes('très intéressant') || value.includes('plutôt intéressant')) return 'verdict-green';
+  if (value.includes('dans le marché')) return 'verdict-blue';
+  if (value.includes('cher')) return 'verdict-red';
+  return 'verdict-orange';
+}
+
+function showAnalysis(vehicle) {''', 'confidence helpers')
+
+          replace_once('''    '<p class="score">' +
+    "Confiance de lecture : " +
     readingConfidence(vehicle) +
-    "/100</p>" +
+    "/100</p>" +''', '''    '<p class="score confidence-pill ' + confidenceTone(readingConfidence(vehicle)) + '">' +
+    "🔎 Confiance de lecture : " +
+    readingConfidence(vehicle) +
+    "/100</p>" +''', 'confidence display')
 
-    '<p class="muted">Score indicatif basé sur la présence et la cohérence des informations essentielles. Il ne mesure pas l’état du véhicule.</p>' +'''
-          if old not in s:
-              raise SystemExit('confidence display marker not found')
-          s = s.replace(old, new, 1)
-
-          old = '''  const comparables =
+          replace_once('''  const comparables =
     marketData.comparables || [];
 
-  market.innerHTML ='''
-          new = '''  const comparables =
+  const negotiationAdvice =''', '''  const comparables =
     marketData.comparables || [];
 
-  const negotiationAdvice =
-    comparables.length >= 3
-      ? "Pour négocier, appuyez-vous d’abord sur les comparables réellement compatibles. Demandez les preuves d’entretien, le contrôle technique, l’historique et les éventuels frais à prévoir (pneus, freins, distribution, révision, batterie selon le véhicule). Si le prix demandé est supérieur au niveau observé, utilisez ces éléments pour fixer une offre de départ réaliste et gardez une marge pour les frais immédiats."
-      : "Les données de marché sont encore trop limitées pour fixer un prix de négociation fiable. Avant de faire une offre, vérifiez l’historique, le contrôle technique et les factures, puis inspectez les principaux postes de dépense (pneus, freins, distribution, embrayage ou batterie selon le véhicule). Tout défaut ou entretien à venir peut devenir un argument concret pour négocier.";
+  const tone = marketTone(marketData.label);
+  const verdictEmoji =
+    tone === 'verdict-green' ? '🟢' :
+    tone === 'verdict-blue' ? '🔵' :
+    tone === 'verdict-red' ? '🔴' : '🟠';
 
-  market.innerHTML ='''
-          if old not in s:
-              raise SystemExit('market comparables marker not found')
-          s = s.replace(old, new, 1)
+  const negotiationAdvice =''', 'market tone')
 
-          old = '''    "<h3>Comparables utilisés</h3>" +'''
-          new = '''    '<div class="result"><h3>💬 Axes d’amélioration / négociation</h3><p>' +
+          replace_once('''    '<div class="status">' +''', '''    '<div class="status verdict ' + tone + '">' +
+
+    '<div class="verdict-title">' +
+    verdictEmoji + ' ' +
+    escapeHtml(marketData.label || 'Résultat') +
+    '</div>' +''', 'market verdict block')
+
+          replace_once('''    "<b>" +
+    escapeHtml(marketData.label) +
+    "</b>" +
+
+    "<p>" +''', '''    "<p>" +''', 'duplicate market label')
+
+          replace_once('''    '<h3>Comparables utilisés</h3>' +''', '''    '<div class="result"><h3>💬 Axes d’amélioration / négociation</h3><p>' +
     escapeHtml(negotiationAdvice) +
     "</p></div>" +
 
-    "<h3>Comparables utilisés</h3>" +'''
-          if old not in s:
-              raise SystemExit('comparables heading marker not found')
-          s = s.replace(old, new, 1)
+    '<h3>📊 Comparables utilisés</h3>' +''', 'negotiation heading')
+
+          replace_once('''.tag {
+  display: inline-block;
+  background: #e9edf1;
+  border-radius: 99px;
+  padding: 5px 10px;
+  margin: 3px 4px 3px 0;
+}
+''', '''.tag {
+  display: inline-block;
+  background: #e9edf1;
+  border-radius: 99px;
+  padding: 5px 10px;
+  margin: 3px 4px 3px 0;
+}
+
+.verdict {
+  border: 3px solid transparent;
+}
+
+.verdict-title {
+  font-size: 27px;
+  font-weight: 900;
+  margin-bottom: 14px;
+}
+
+.verdict-green {
+  background: #e8f7ed;
+  border-color: #2e9d59;
+}
+
+.verdict-blue {
+  background: #e9f2ff;
+  border-color: #4386d9;
+}
+
+.verdict-orange {
+  background: #fff3df;
+  border-color: #e6a33a;
+}
+
+.verdict-red {
+  background: #ffe7e7;
+  border-color: #d94b4b;
+}
+
+.confidence-pill {
+  border-radius: 16px;
+  padding: 12px 15px;
+}
+
+.confidence-good {
+  background: #e8f7ed;
+  color: #176b39;
+}
+
+.confidence-ok {
+  background: #e9f2ff;
+  color: #245b98;
+}
+
+.confidence-caution {
+  background: #fff3df;
+  color: #8a5b13;
+}
+
+.confidence-low {
+  background: #ffe7e7;
+  color: #9b2929;
+}
+''', 'color css')
 
           p.write_text(s)
           PY
@@ -99,5 +189,5 @@ function showAnalysis(vehicle) {'''
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add server.js
-          git commit -m "Improve reading confidence and buyer negotiation advice"
+          git commit -m "Add color coded verdicts and quick signals"
           git push
