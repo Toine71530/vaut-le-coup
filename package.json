@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node market-wrapper.js",
+    "start": "node ui-wrapper.js",
     "dev": "node --watch server.js"
   },
   "dependencies": {
