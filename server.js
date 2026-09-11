@@ -1196,6 +1196,46 @@ const result =
 
 let files = [];
 
+function formatEuro(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(Number(value))
+  ) {
+    return "Non déterminé";
+  }
+
+  return new Intl.NumberFormat("fr-FR", {
+    style: "currency",
+    currency: "EUR",
+    maximumFractionDigits: 0
+  }).format(Number(value));
+}
+
+function formatKm(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(Number(value))
+  ) {
+    return "Non déterminé";
+  }
+
+  return new Intl.NumberFormat("fr-FR").format(Number(value)) + " km";
+}
+
+function formatSeller(value) {
+  if (value === "professional") {
+    return "Professionnel";
+  }
+
+  if (value === "private") {
+    return "Particulier";
+  }
+
+  return null;
+}
+
 /* =========================================================
    PHOTOS
 ========================================================= */
