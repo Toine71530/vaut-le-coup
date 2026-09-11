@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node ui-wrapper.js",
+    "start": "node bootstrap.js",
     "dev": "node --watch server.js"
   },
   "dependencies": {
