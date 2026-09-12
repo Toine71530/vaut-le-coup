@@ -3,8 +3,50 @@ import './bootstrap.js';
 
 const bootstrapJson = express.response.json;
 
+function cleanAnalysisPayload(payload) {
+  if (!payload || !payload.ok) return payload;
+
+  const vehicle = payload.vehicle || payload.analysis || payload;
+  const make = String(vehicle?.make || '').toLowerCase();
+  const model = String(vehicle?.model || '').toLowerCase();
+  const version = String(vehicle?.version || vehicle?.trim || vehicle?.finish || '').toLowerCase();
+  const energy = String(vehicle?.energy || '').toLowerCase();
+  const power = Number(vehicle?.power_hp ?? vehicle?.power ?? 0);
+
+  // Toyota Corolla 1.8 Hybrid 122h : 122 ch correspond à la puissance système,
+  // tandis que 98 ch DIN correspond à la puissance du moteur thermique.
+  // Ce n'est donc pas une contradiction à signaler.
+  const isCorolla122h = make.includes('toyota') && model.includes('corolla') &&
+    energy.includes('hybrid') && (version.includes('122h') || power === 122);
+
+  if (isCorolla122h) {
+    const contradictionPatterns = [
+      /puissance\s+din.*98\s*ch.*contradictoire.*122h/i,
+      /98\s*ch.*contradictoire.*122h/i,
+      /122h.*contradictoire.*98\s*ch/i,
+      /98\s*ch.*122h.*contradiction/i,
+      /122h.*98\s*ch.*contradiction/i
+    ];
+
+    for (const key of ['warnings', 'points_of_attention', 'vigilance']) {
+      if (Array.isArray(payload[key])) {
+        payload[key] = payload[key].filter(item => {
+          const text = typeof item === 'string' ? item : JSON.stringify(item);
+          return !contradictionPatterns.some(re => re.test(text));
+        });
+      }
+    }
+  }
+
+  return payload;
+}
+
 express.response.json = function marketPolicyJson(payload) {
   try {
+    if (this.req?.path === '/api/analyze') {
+      payload = cleanAnalysisPayload(payload);
+    }
+
     if (this.req?.path === '/api/market' && payload?.ok) {
       const comparables = Number(payload.comparables || 0);
 
@@ -50,7 +92,7 @@ express.response.json = function marketPolicyJson(payload) {
       }
     }
   } catch (error) {
-    console.error('Market sample policy error', error?.message || error);
+    console.error('Market policy error', error?.message || error);
   }
   return bootstrapJson.call(this, payload);
 };
