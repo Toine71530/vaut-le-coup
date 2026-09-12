@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node app.js",
-    "dev": "node --watch app.js"
+    "start": "node bootstrap.js",
+    "dev": "node --watch bootstrap.js"
   },
   "dependencies": {
     "express": "^5.1.0",
