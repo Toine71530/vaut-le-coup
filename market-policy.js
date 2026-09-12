@@ -61,9 +61,6 @@ function cleanAnalysisPayload(payload) {
     }
   }
 
-  // Un CT réalisé pendant une année donnée peut rester valable jusqu'à deux ans plus tard.
-  // Ne supprimer que le faux conflit connu où Gemini oppose simplement "CT réalisé en AAAA"
-  // à "fin de validité CT AAAA+2". Les autres contradictions restent affichées.
   const isFalseCtContradiction = item => {
     const text = typeof item === 'string' ? item : JSON.stringify(item);
     const normalized = text.toLowerCase();
@@ -83,8 +80,6 @@ function cleanAnalysisPayload(payload) {
   if (isFalseCtContradiction(vehicle.warning)) vehicle.warning = null;
   if (isFalseCtContradiction(payload.warning)) payload.warning = null;
 
-  // Vigilance spécifique aux anciennes générations 1.2 PureTech : ne pas diagnostiquer
-  // une panne, mais inviter à vérifier entretien, courroie et éventuelles interventions.
   const vehicleText = [
     vehicle?.title,
     vehicle?.version,
@@ -93,13 +88,20 @@ function cleanAnalysisPayload(payload) {
     ...(Array.isArray(vehicle?.visible_claims) ? vehicle.visible_claims : [])
   ].map(x => String(x ?? '').toLowerCase()).join(' ');
   const isPureTech12 = make.includes('peugeot') && /\b1[.,]2\s*puretech\b/i.test(vehicleText);
-  const hasPureTechWarning = ['warnings', 'points_of_attention', 'vigilance']
-    .some(key => Array.isArray(vehicle[key]) && vehicle[key].some(item => /puretech|courroie|consommation d['’]huile/i.test(String(item))));
+  const pureTechKeys = ['warnings', 'points_of_attention', 'vigilance'];
+  const hasPureTechWarning = pureTechKeys.some(key =>
+    (Array.isArray(vehicle[key]) && vehicle[key].some(item => /puretech|courroie|consommation d['’]huile/i.test(String(item)))) ||
+    (Array.isArray(payload[key]) && payload[key].some(item => /puretech|courroie|consommation d['’]huile/i.test(String(item))))
+  );
 
   if (isPureTech12 && !hasPureTechWarning) {
     const warning = '⚠️ Moteur 1.2 PureTech : vérifier l’historique d’entretien, la courroie de distribution et les éventuelles interventions liées à une consommation d’huile avant achat.';
     if (Array.isArray(vehicle.warnings)) vehicle.warnings.push(warning);
     else vehicle.warnings = [warning];
+    if (Array.isArray(payload.warnings)) payload.warnings.push(warning);
+    else payload.warnings = [warning];
+    if (Array.isArray(vehicle.vigilance)) vehicle.vigilance.push(warning);
+    else vehicle.vigilance = [warning];
   }
 
   return payload;
@@ -195,14 +197,9 @@ express.response.json = function marketPolicyJson(payload) {
       payload = applyTargetExclusion(payload, vehicle);
       const comparables = Number(payload.comparables || 0);
 
-      // Une contradiction de configuration invalide toute comparaison : il faut
-      // d'abord vérifier la carte grise et la configuration réelle.
       if (hasPlaceContradiction(vehicle)) {
         payload = blockMarket(payload,
           'Comparaison bloquée : l’annonce contient une contradiction sur le nombre de places (2 et 5). Vérifier la carte grise et la configuration réelle avant toute comparaison de prix.');
-      // Un VASP/utilitaire 2 places ne doit jamais être comparé à une Corolla
-      // particulière/familiale 5 places. CarHunt ne fournit pas ici un filtre
-      // suffisamment fiable sur la carrosserie VASP et le nombre de places.
       } else if (isVaspTwoSeat(vehicle)) {
         payload = blockMarket(payload,
           'Comparaison bloquée : véhicule VASP/utilitaire 2 places. Les annonces 5 places ne sont pas des comparables fiables. Aucun verdict de prix n’est donné sans échantillon VASP 2 places réellement comparable.',
