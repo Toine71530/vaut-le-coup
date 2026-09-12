@@ -1,11 +1,51 @@
-// Production bootstrap.
-// ui-final runs internally; this public proxy keeps the frontend contract stable.
+// Production bootstrap with resilient Gemini fallback.
+// The UI/market stack stays unchanged; this layer only makes Gemini image analysis
+// tolerant of temporary 429/503/5xx model-capacity spikes.
 import http from "node:http";
 
+const nativeFetch = globalThis.fetch;
 const INTERNAL_PORT = 10003;
 const PUBLIC_PORT = Number(process.env.PORT || 10000);
-process.env.PORT = String(INTERNAL_PORT);
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isGeminiGenerate(url) {
+  return typeof url === "string" &&
+    url.includes("generativelanguage.googleapis.com") &&
+    url.includes(":generateContent");
+}
+
+function replaceModel(url, model) {
+  return url.replace(/\/models\/[^:]+:generateContent/, `/models/${model}:generateContent`);
+}
+
+async function resilientGeminiFetch(input, init) {
+  const originalUrl = typeof input === "string" ? input : input?.url;
+  if (!isGeminiGenerate(originalUrl)) return nativeFetch(input, init);
+
+  // Primary stable model first; if Google reports temporary capacity/rate limits,
+  // retry briefly and finally fall back to another stable free-tier Flash model.
+  const models = ["gemini-3.6-flash", "gemini-3.6-flash", "gemini-3.6-flash", "gemini-3.5-flash"];
+  let lastResponse;
+
+  for (let i = 0; i < models.length; i++) {
+    const url = replaceModel(originalUrl, models[i]);
+    const request = typeof input === "string" ? url : new Request(url, input);
+    const response = await nativeFetch(request, init);
+    lastResponse = response;
+
+    if (response.ok) return response;
+    if (![429, 500, 502, 503, 504].includes(response.status)) return response;
+    if (i < models.length - 1) await sleep(1000 * (i + 1));
+  }
+
+  return lastResponse;
+}
+
+globalThis.fetch = resilientGeminiFetch;
+process.env.PORT = String(INTERNAL_PORT);
 await import("./ui-final.js");
 
 const server = http.createServer((req, res) => {
