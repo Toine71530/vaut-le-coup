@@ -5,8 +5,8 @@ const app = express();
 const PORT = Number(process.env.PORT || 10000);
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const CARHUNT_KEY = process.env.CARHUNT_API_KEY || '';
-const MODELS = ['gemini-2.5-flash-lite', 'gemini-2.5-flash'];
-const VERSION = '2026-09-12.6';
+const MODELS = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+const VERSION = '2026-09-12.7';
 const upload = multer({ storage: multer.memoryStorage(), limits: { files: 3, fileSize: 12 * 1024 * 1024 } });
 
 app.disable('x-powered-by');
@@ -16,7 +16,7 @@ app.use((req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next()
 const number = v => { if (v == null || v === '') return null; const n = Number(String(v).replace(/\s/g, '').replace(',', '.')); return Number.isFinite(n) ? n : null; };
 const norm = v => String(v ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 const same = (a, b) => { const x = norm(a), y = norm(b); return !!x && !!y && (x === y || x.includes(y) || y.includes(x)); };
-const escapeHtml = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#039;' }[c]));
+const escapeHtml = v => String(v ?? '').replace(/[&<>\"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '\"':'&quot;', "'":'&#039;' }[c]));
 const median = values => { const a = values.filter(Number.isFinite).sort((x,y)=>x-y); if (!a.length) return null; const i = Math.floor(a.length/2); return a.length % 2 ? a[i] : (a[i-1]+a[i])/2; };
 const percentile = (values,p) => { const a=values.filter(Number.isFinite).sort((x,y)=>x-y); return a.length ? a[Math.round((a.length-1)*p)] : null; };
 async function fetchWithTimeout(url, options, ms) { const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),ms); try { return await fetch(url,{...options,signal:controller.signal}); } finally { clearTimeout(timer); } }
@@ -25,9 +25,9 @@ const PROMPT = `Analyse ces photos/captures d'une MEME annonce automobile. Recou
 
 async function askGemini(model, files) {
   const body = { contents:[{ role:'user', parts:[{text:PROMPT}, ...files.map(f=>({inline_data:{mime_type:f.mimetype,data:f.buffer.toString('base64')}}))] }], generationConfig:{temperature:0,responseMimeType:'application/json',maxOutputTokens:1800} };
-  const url='https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(GEMINI_KEY);
+  const url='https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent';
   let response;
-  try { response=await fetchWithTimeout(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},25000); }
+  try { response=await fetchWithTimeout(url,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':GEMINI_KEY},body:JSON.stringify(body)},25000); }
   catch(e) { const err=new Error(e?.name==='AbortError'?'TIMEOUT':'NETWORK'); err.status=0; throw err; }
   const raw=await response.text();
   if(!response.ok){const err=new Error('HTTP_'+response.status);err.status=response.status;err.raw=raw.slice(0,500);throw err;}
@@ -73,11 +73,11 @@ async function market(v){
   return{ok:true,comparables:prices.length,asking,median:Math.round(med),low:Math.round(percentile(prices,.15)),high:Math.round(percentile(prices,.85)),score,label,gap_pct:gap==null?null:Math.round(gap*10)/10,gap_eur:asking==null?null:Math.round(med-asking),warning:prices.length<8?'Échantillon limité : prudence dans le verdict.':null,sample:comps.slice(0,8).map(x=>({price:x.priceNum,year:x.year,mileage:x.mileage,energy:x.energy,gearbox:x.gearbox,version:x.version,city:x.city,url:x.source_url}))};
 }
 
-app.get('/api/health',(_req,res)=>res.json({ok:true,version:VERSION,provider:'gemini',gemini:Boolean(GEMINI_KEY),carhunt:Boolean(CARHUNT_KEY)}));
+app.get('/api/health',(_req,res)=>res.json({ok:true,version:VERSION,provider:'gemini',models:MODELS,gemini:Boolean(GEMINI_KEY),carhunt:Boolean(CARHUNT_KEY)}));
 app.post('/api/analyze',(req,res)=>upload.array('photos',3)(req,res,async err=>{
   if(err)return res.status(400).json({ok:false,error:err.code==='LIMIT_FILE_SIZE'?'Une photo dépasse 12 Mo.':'Impossible de recevoir les photos.'});
   try{const files=req.files||[];if(!files.length)return res.status(400).json({ok:false,error:'Ajoute au moins une photo.'});console.log('POST /api/analyze',files.length);const vehicle=await analyze(files);console.log('Analyze OK',vehicle.make,vehicle.model);res.json({ok:true,vehicle});}
-  catch(e){console.error('Analyze error',e.message,e.status||'');let error='Analyse IA indisponible. Réessaie.';if(e.message==='NO_GEMINI_KEY')error='Gemini n’est pas configuré sur le serveur.';else if(e.message==='TIMEOUT')error='Analyse trop longue. Réessaie.';else if(e.status===429)error='Gemini est momentanément très sollicité. Réessaie dans quelques secondes.';res.status(503).json({ok:false,error});}
+  catch(e){console.error('Analyze error',e.message,e.status||'',e.raw||'');let error='Analyse IA indisponible. Réessaie.';if(e.message==='NO_GEMINI_KEY')error='Gemini n’est pas configuré sur le serveur.';else if(e.message==='TIMEOUT')error='Analyse trop longue. Réessaie.';else if(e.status===404)error='Le modèle Gemini configuré n’est pas accessible avec cette clé.';else if(e.status===429)error='Gemini est momentanément très sollicité. Réessaie dans quelques secondes.';res.status(503).json({ok:false,error});}
 }));
 app.post('/api/market',async(req,res)=>{try{const result=await market(req.body||{});res.status(result.ok?200:503).json(result);}catch{res.status(503).json({ok:false,error:'Comparaison marché indisponible.'});}});
 
