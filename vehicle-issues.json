@@ -1,0 +1,29 @@
+{
+  "version": "2026-09-12.1",
+  "scope": "Défaillances connues et rappels documentés. Une entrée n'est jamais une certitude sur un véhicule donné : elle déclenche une vérification ciblée.",
+  "entries": [
+    {
+      "id": "peugeot-puretech-12-courroie-huile",
+      "type": "known_weakness",
+      "make": "Peugeot",
+      "model": "*",
+      "engine_keywords": ["1.2 puretech", "1,2 puretech"],
+      "year_min": 2013,
+      "year_max": 2022,
+      "severity": "high",
+      "title": "1.2 PureTech — courroie de distribution / consommation d'huile",
+      "description": "Peugeot indique qu'une partie des moteurs PureTech est concernée par une consommation d'huile excessive et/ou une dégradation prématurée de la courroie de distribution, avec une couverture spéciale sous conditions pour certains véhicules.",
+      "checks": [
+        "Vérifier le plan d'entretien et les factures.",
+        "Vérifier l'état et l'historique de la courroie de distribution.",
+        "Rechercher les interventions liées à une consommation d'huile.",
+        "Demander, si disponible, un certificat Check+ ou un justificatif de prise en charge."
+      ],
+      "negotiation_reserve_eur": 500,
+      "source": "Peugeot — Moteurs PureTech, nos solutions",
+      "source_url": "https://www.peugeot.fr/entretien-et-services/moteurs-puretech-solutions.html",
+      "source_type": "manufacturer",
+      "last_verified": "2026-09-12"
+    }
+  ]
+}
