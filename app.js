@@ -6,7 +6,7 @@ const PORT = Number(process.env.PORT || 10000);
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const CARHUNT_KEY = process.env.CARHUNT_API_KEY || '';
 const MODELS = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
-const VERSION = '2026-09-12.8';
+const VERSION = '2026-09-12.9';
 const upload = multer({ storage: multer.memoryStorage(), limits: { files: 3, fileSize: 12 * 1024 * 1024 } });
 
 app.disable('x-powered-by');
@@ -53,6 +53,7 @@ async function analyze(files){
   }
   throw last || new Error('GEMINI_FAILED');
 }
+
 function comparable(x,v){
   if(!same(x.make,v.make)||!same(x.model,v.model))return false;
   const year=number(v.year), itemYear=number(x.year), km=number(v.mileage_km), itemKm=number(x.mileage);
@@ -60,8 +61,19 @@ function comparable(x,v){
   if(km!=null&&itemKm!=null&&Math.abs(km-itemKm)>60000)return false;
   if(v.energy&&x.energy&&!same(v.energy,x.energy))return false;
   if(v.gearbox&&x.gearbox&&!same(v.gearbox,x.gearbox))return false;
+  const hp=number(v.power_hp), itemHp=number(x.horsepower);
+  if(hp!=null&&itemHp!=null&&Math.abs(hp-itemHp)>35)return false;
+  const bodyV=norm(v.body_style||v.body_type), bodyX=norm(x.body_style||x.body_type||x.body);
+  if(bodyV&&bodyX&&!same(bodyV,bodyX))return false;
+  const finishV=norm(v.version||v.finish), finishX=norm(x.version||x.finish||x.finition);
+  if(finishV&&finishX){
+    const tokens=finishV.split(' ').filter(t=>t.length>=3);
+    const overlap=tokens.filter(t=>finishX.includes(t)).length;
+    if(tokens.length>=2&&overlap===0)return false;
+  }
   return number(x.price)>0;
 }
+
 async function market(v){
   if(!CARHUNT_KEY)return{ok:false,error:'Comparaison marché indisponible : clé CarHunt absente.'};
   if(!v?.make||!v?.model)return{ok:false,error:'Impossible de comparer : marque ou modèle non identifié.'};
