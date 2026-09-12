@@ -80,8 +80,35 @@ globalThis.fetch = async function patchedFetch(input, init) {
   return nativeFetch(input, init);
 };
 
+function buildMarketSafety(vehicle, market) {
+  const asking = Number(vehicle?.price_eur ?? market?.asking);
+  const median = Number(market?.median);
+  const comparables = Number(market?.comparables || 0);
+  if (!Number.isFinite(asking) || !Number.isFinite(median) || asking <= 0 || median <= 0 || comparables < 3) {
+    return { level: 'unknown', suspicious: false };
+  }
+  const gapPct = ((median - asking) / median) * 100;
+  if (gapPct >= 30) {
+    return {
+      level: 'high', suspicious: true,
+      title: '⚠️ Prix anormalement bas',
+      message: `Le prix est environ ${gapPct.toFixed(1).replace('.', ',')} % sous la médiane. Ce n'est pas une bonne affaire confirmée : il faut d'abord comprendre pourquoi.`,
+      checks: ['Vérifier identité et statut du vendeur', 'Vérifier VIN/carte grise et historique', 'Vérifier contrôle technique et factures', 'Vérifier accidents, importation et travaux', 'Ne verser aucun acompte avant d’avoir vu et vérifié le véhicule']
+    };
+  }
+  if (gapPct >= 20) {
+    return {
+      level: 'medium', suspicious: true,
+      title: '🟠 Prix nettement sous le marché',
+      message: `Le prix est environ ${gapPct.toFixed(1).replace('.', ',')} % sous la médiane. Opportunité possible, mais écart à expliquer avant de conclure.`,
+      checks: ['Vérifier historique, kilométrage et justificatifs', 'Vérifier l’état réel du véhicule lors de la visite', 'S’assurer que le prix annoncé correspond bien au véhicule']
+    };
+  }
+  return { level: 'normal', suspicious: false };
+}
+
 // Une voiture déjà très sous le marché ne doit pas être artificiellement tirée
-// encore 5 à 10 % plus bas : l'axe doit rester une négociation réaliste.
+// encore plus bas. En cas d'anomalie importante, la priorité devient la vérification.
 function buildNegotiation(vehicle, market) {
   const asking = Number(vehicle?.price_eur ?? market?.asking);
   const median = Number(market?.median);
@@ -95,17 +122,23 @@ function buildNegotiation(vehicle, market) {
   const seller = vehicle?.seller_type;
   const round50 = n => Math.round(n / 50) * 50;
 
-  const risk = Math.min(0.025,
+  const risk = Math.min(0.02,
     Math.min(warnings.length, 2) * 0.005 +
     Math.min(uncertain.length, 2) * 0.0025
   );
 
   let opening, target, ceiling, position, negotiationMode;
-  if (gapPct >= 20) {
+  if (gapPct >= 30) {
+    position = 'prix_anormalement_bas';
+    negotiationMode = 'verification_avant_negociation';
+    opening = asking;
+    target = asking;
+    ceiling = asking;
+  } else if (gapPct >= 20) {
     position = 'tres_sous_le_marche';
-    negotiationMode = 'prix_deja_tres_attractif';
-    target = asking * (1 - Math.min(risk, 0.01));
-    opening = asking * (1 - Math.min(0.01 + risk, 0.02));
+    negotiationMode = 'negociation_tres_legere';
+    target = asking * (1 - Math.min(risk, 0.005));
+    opening = asking * (1 - Math.min(0.005 + risk, 0.01));
     ceiling = asking;
   } else if (gapPct >= 7) {
     position = 'sous_le_marche';
@@ -132,8 +165,11 @@ function buildNegotiation(vehicle, market) {
   ceiling = Math.max(opening, round50(ceiling));
 
   const args = [];
-  if (gapPct >= 20) {
-    args.push(`Le prix demandé est déjà environ ${Math.abs(gapPct).toFixed(1).replace('.', ',')} % sous la médiane des comparables : éviter une négociation agressive.`);
+  if (gapPct >= 30) {
+    args.push(`Le prix est environ ${Math.abs(gapPct).toFixed(1).replace('.', ',')} % sous la médiane : priorité à la vérification, pas à la négociation.`);
+    args.push('Un écart aussi important doit être expliqué avant de considérer le véhicule comme une bonne affaire.');
+  } else if (gapPct >= 20) {
+    args.push(`Le prix demandé est déjà environ ${Math.abs(gapPct).toFixed(1).replace('.', ',')} % sous la médiane : éviter une négociation agressive.`);
   } else if (gapPct >= 7) {
     args.push(`Le prix demandé est environ ${Math.abs(gapPct).toFixed(1).replace('.', ',')} % sous la médiane : demander seulement un petit geste si la visite confirme l'état annoncé.`);
   } else if (gapPct > -7) {
@@ -148,7 +184,9 @@ function buildNegotiation(vehicle, market) {
   if (seller === 'professional') args.push('Professionnel : négocier aussi, si nécessaire, une prestation ou une garantie plutôt qu’une forte remise injustifiée.');
 
   let phrase;
-  if (gapPct >= 20) {
+  if (gapPct >= 30) {
+    phrase = `« Le prix est très inférieur au marché. Avant de parler remise, je souhaite vérifier le véhicule, son historique et les justificatifs. Si tout est conforme, votre prix de ${asking.toLocaleString('fr-FR')} € est déjà très attractif. »`;
+  } else if (gapPct >= 20) {
     phrase = `« Le prix est déjà très bien placé par rapport au marché. Si tout est conforme lors de la visite, je peux vous proposer ${opening.toLocaleString('fr-FR')} € pour conclure rapidement. »`;
   } else if (opening < asking) {
     phrase = `« Le véhicule m'intéresse. Au vu du marché et des points à vérifier, je peux vous proposer ${opening.toLocaleString('fr-FR')} € si tout est conforme lors de la visite. »`;
@@ -164,23 +202,35 @@ function buildNegotiation(vehicle, market) {
     market_gap_pct: Math.round(gapPct * 10) / 10,
     risk_discount_pct: Math.round(risk * 1000) / 10,
     arguments: args.slice(0, 8), suggested_phrase: phrase,
-    rule: 'Repères de négociation, pas garantie du prix obtenu. Plus le prix est déjà sous le marché, plus la négociation doit rester légère. Ne jamais négocier un défaut non vérifié.'
+    rule: 'Repères de négociation, pas garantie du prix obtenu. Si le prix est anormalement bas, la priorité est de comprendre l’écart et de vérifier le véhicule. Ne jamais négocier un défaut non vérifié.'
   };
 }
 
 express.response.json = function patchedJson(payload) {
   try {
     if (this.req?.path === '/api/market' && payload?.ok) {
-      payload = { ...payload, negotiation: buildNegotiation(this.req.body || {}, payload) };
+      const vehicle = this.req.body || {};
+      const safety = buildMarketSafety(vehicle, payload);
+      let enriched = { ...payload, market_safety: safety, negotiation: buildNegotiation(vehicle, payload) };
+
+      // Le score ne doit jamais transformer une anomalie majeure en "100/100 très bonne affaire".
+      if (safety.level === 'high' && Number.isFinite(Number(enriched.score))) {
+        enriched.score = Math.min(Number(enriched.score), 55);
+        enriched.label = '⚠️ Prix anormalement bas — à vérifier';
+      } else if (safety.level === 'medium' && Number.isFinite(Number(enriched.score))) {
+        enriched.score = Math.min(Number(enriched.score), 70);
+        enriched.label = '🟠 Très sous le marché — à vérifier';
+      }
+      payload = enriched;
     }
-  } catch (error) { console.error('Negotiation enrichment error', error?.message || error); }
+  } catch (error) { console.error('Market safety enrichment error', error?.message || error); }
   return originalJson.call(this, payload);
 };
 
 express.response.send = function patchedSend(body) {
   if (typeof body === 'string' && body.includes('</body>') && body.includes('Vaut le Coup ?')) {
     const injection = `<section id="negotiation" class="card" hidden></section>
-<style>.neg-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.neg-box{background:#f6f7f8;border-radius:14px;padding:13px}.neg-box strong{font-size:22px}.neg-main{background:#eef2f5;border-radius:18px;padding:16px}.neg-arg{padding:9px 0;border-bottom:1px solid #e1e5e8}.neg-quote{background:#fff8e7;border-left:4px solid #17212b;border-radius:10px;padding:13px;margin-top:12px}@media(max-width:520px){.neg-grid{grid-template-columns:1fr 1fr}}</style>
+<style>.neg-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.neg-box{background:#f6f7f8;border-radius:14px;padding:13px}.neg-box strong{font-size:22px}.neg-main{background:#eef2f5;border-radius:18px;padding:16px}.neg-arg{padding:9px 0;border-bottom:1px solid #e1e5e8}.neg-quote{background:#fff8e7;border-left:4px solid #17212b;border-radius:10px;padding:13px;margin-top:12px}.market-alert{background:#fff0d2;border-radius:16px;padding:15px;margin-bottom:12px}.market-alert strong{display:block;margin-bottom:6px}.market-check{padding:5px 0}@media(max-width:520px){.neg-grid{grid-template-columns:1fr 1fr}}</style>
 <script>
 (function(){
   var originalFetch=window.fetch.bind(window);
@@ -191,11 +241,18 @@ express.response.send = function patchedSend(body) {
       if(url && url.includes('/api/market')){
         var data=await response.clone().json();
         window.__vlcNegotiation=data.negotiation||null;
+        var safety=data.market_safety||null;
         var n=window.__vlcNegotiation, section=document.getElementById('negotiation');
         if(n && n.available && section){
           function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c];});}
           function euro(v){return Number(v).toLocaleString('fr-FR')+' €';}
-          var h='<h2>🎯 Axe de négociation</h2><div class="neg-main"><div class="neg-grid">';
+          var h='<h2>🎯 Axe de négociation</h2>';
+          if(safety && safety.suspicious){
+            h+='<div class="market-alert"><strong>'+esc(safety.title)+'</strong><div>'+esc(safety.message)+'</div>';
+            if(Array.isArray(safety.checks)) safety.checks.forEach(function(x){h+='<div class="market-check">☑ '+esc(x)+'</div>';});
+            h+='</div>';
+          }
+          h+='<div class="neg-main"><div class="neg-grid">';
           h+='<div class="neg-box"><b>Offre de départ</b><br><strong>'+esc(euro(n.opening_offer))+'</strong></div>';
           h+='<div class="neg-box"><b>Prix cible</b><br><strong>'+esc(euro(n.target_price))+'</strong></div>';
           h+='<div class="neg-box"><b>Plafond conseillé</b><br><strong>'+esc(euro(n.ceiling_price))+'</strong></div>';
