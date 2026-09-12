@@ -15,6 +15,11 @@ const quantile = (a,p) => { const x=[...a].sort((a,b)=>a-b); if(!x.length)return
 const euro = x => x==null ? "Non déterminé" : Math.round(x).toLocaleString("fr-FR")+" €";
 const fuelMatch = (a,b) => !b || norm(a).includes(norm(b)) || norm(b).includes(norm(a));
 const gearMatch = (a,b) => !b || norm(a).includes(norm(b)) || (norm(b).includes("manuel") && norm(a).includes("manual")) || (norm(b).includes("auto") && norm(a).includes("auto"));
+const apiError = (data, status) => {
+  const d = data?.detail ?? data?.message ?? data?.error;
+  let text = typeof d === "string" ? d : d ? JSON.stringify(d) : "Requête refusée par CarHunt.";
+  return `CarHunt HTTP ${status}: ${text}`;
+};
 
 async function carhunt(body){
   const key=process.env.CARHUNT_API_KEY;
@@ -22,18 +27,19 @@ async function carhunt(body){
   const v=body||{}, make=String(v.make||"").trim(), model=String(v.model||"").trim();
   if(!make||!model)return {error:"Marque et modèle nécessaires."};
 
-  // Requête volontairement minimale : certains filtres CarHunt peuvent renvoyer 422 selon leur valeur normalisée.
-  // On filtre ensuite localement avec les données normalisées retournées par CarHunt.
+  // IMPORTANT : la documentation CarHunt valide explicitement make/model/page_size.
+  // On commence sans aucun filtre optionnel afin d'éviter les 422 liés aux valeurs normalisées.
+  // Tous les critères spécifiques au véhicule sont ensuite filtrés localement.
   const params=new URLSearchParams({make:make.toUpperCase(),model:model.toUpperCase(),page_size:"100"});
-  if(v.year){params.set("year_min",String(Number(v.year)-1));params.set("year_max",String(Number(v.year)+1));}
   const controller=new AbortController();
   const timeout=setTimeout(()=>controller.abort(),15000);
   try{
-    const r=await fetch(`https://api-pro.carhunt.fr/v1/listings/search?${params}`,{headers:{Authorization:`Bearer ${key}`},signal:controller.signal});
+    const url=`https://api-pro.carhunt.fr/v1/listings/search?${params.toString()}`;
+    const r=await fetch(url,{headers:{Authorization:`Bearer ${key}`,Accept:"application/json"},signal:controller.signal});
     const raw=await r.text();
     let data={}; try{data=raw?JSON.parse(raw):{}}catch{}
-    if(!r.ok) return {error:`CarHunt HTTP ${r.status}${data?.detail?`: ${data.detail}`:"."}`};
-    let listings=(data.listings||[]).filter(x=>n(x.price)!=null&&n(x.price)>0);
+    if(!r.ok) return {error:apiError(data,r.status)};
+    let listings=(Array.isArray(data.listings)?data.listings:[]).filter(x=>n(x.price)!=null&&n(x.price)>0);
 
     const targetKm=n(v.mileage_km), targetYear=n(v.year);
     if(targetKm!=null) listings=listings.filter(x=>{const k=n(x.mileage);return k==null||Math.abs(k-targetKm)<=30000;});
