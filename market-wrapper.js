@@ -8,28 +8,216 @@ const INTERNAL_PORT = 10001;
 const TARGET = `http://127.0.0.1:${INTERNAL_PORT}`;
 app.use(express.json({ limit: "2mb" }));
 
-const up=v=>String(v??"").toUpperCase();
-const num=v=>{if(typeof v==="number"&&Number.isFinite(v))return v;const s=String(v??"").replace(/\u00a0/g," ").replace(/[^0-9,.-]/g,"").replace(/\.(?=\d{3}(?:\D|$))/g,"").replace(",",".");const n=Number(s);return Number.isFinite(n)?n:null};
-const year=v=>num(v?.year), km=v=>num(v?.mileage_km??v?.mileage??v?.mileage_display), price=v=>num(v?.price_eur??v?.price??v?.price_display);
-const text=v=>[v?.make,v?.model,v?.version,v?.trim,v?.title,v?.name,v?.description].map(up).join(" ");
-function energy(v){const s=text(v);if(/PHEV|PLUG.?IN|RECHARGEABLE|HYBRIDE\s+RECHARGEABLE/.test(s))return"phev";if(/HYBRIDE|HEV/.test(s))return"hybrid";if(/ELECTRIQUE|\bEV\b/.test(s))return"ev";if(/ESSENCE|PETROL|GASOLINE/.test(s))return"petrol";if(/DIESEL/.test(s))return"diesel";return null}
-function power(v){const d=num(v?.power_hp??v?.power??v?.horsepower);if(d!==null&&d>=50&&d<=1000)return d;const m=text(v).match(/(?:^|\D)(\d{2,3})\s*(?:CH|HP)(?:\D|$)/);return m?Number(m[1]):null}
-function gearbox(v){const s=text(v);if(/AUTOMAT|E-CVT|CVT/.test(s))return"automatic";if(/MANUEL/.test(s))return"manual";return null}
-function generation(v){const s=text(v);if(/\b(?:PRIUS\s*(?:5|V)|GEN(?:ERATION)?\s*5|MK\s*5)\b/.test(s))return 5;if(/\b(?:PRIUS\s*(?:4|IV)|GEN(?:ERATION)?\s*4|MK\s*4)\b/.test(s))return 4;if(/\b(?:PRIUS\s*(?:3|III)|GEN(?:ERATION)?\s*3|MK\s*3)\b/.test(s))return 3;const y=year(v);if(/\bPRIUS\b/.test(s)&&y!==null&&y>=2023)return 5;return null}
-function modelName(v){return up(v?.model||"").replace(/\s+(?:IV|III|II|I|[0-9]+)$/i,"").trim()||""}
-function compatible(t,c){const tg=generation(t),cg=generation(c);if(tg&&cg&&tg!==cg)return false;const te=energy(t),ce=energy(c);if(te&&ce&&te!==ce)return false;const tp=power(t),cp=power(c);if(tp!==null&&cp!==null&&Math.abs(tp-cp)>25)return false;const ty=year(t),cy=year(c);if(ty!==null&&cy!==null&&Math.abs(ty-cy)>2)return false;const tb=gearbox(t),cb=gearbox(c);if(tb&&cb&&tb!==cb)return false;return price(c)!==null&&price(c)>0}
-function score(t,c){let s=0;const tg=generation(t),cg=generation(c),te=energy(t),ce=energy(c),tp=power(t),cp=power(c),ty=year(t),cy=year(c),tk=km(t),ck=km(c);if(tg&&tg===cg)s+=100;if(te&&te===ce)s+=80;if(tp&&cp)s+=Math.max(0,30-Math.abs(tp-cp));if(ty&&cy)s+=Math.max(0,20-Math.abs(ty-cy)*5);if(tk&&ck)s+=Math.max(0,15-Math.min(15,Math.abs(tk-ck)/10000));return s}
-const euro=n=>n===null?"Non déterminé":Math.round(n).toLocaleString("fr-FR")+" €";
-const kmText=n=>n===null?null:Math.round(n).toLocaleString("fr-FR")+" km";
-function comparable(c){const p=price(c),k=km(c),link=c.source_url||c.url||c.link||null;return{price_display:euro(p),price_eur:p,year:c.year??null,mileage_display:kmText(k),mileage_km:k,energy:c.energy??null,version:c.version||c.finition||c.trim||null,source:c.source??null,url:link,link,source_url:link,seller_type:c.seller_type??null}}
-function median(a){const x=[...a].sort((a,b)=>a-b);return x.length?(x.length%2?x[(x.length-1)/2]:(x[x.length/2-1]+x[x.length/2])/2):null}
-function quantile(a,p){const x=[...a].sort((a,b)=>a-b);if(!x.length)return null;if(x.length===1)return x[0];const i=(x.length-1)*p,l=Math.floor(i),u=Math.ceil(i);return x[l]+(x[u]-x[l])*(i-l)}
-async function search(key,make,model){const q=new URLSearchParams({make,model,page_size:"50"});const r=await fetch(`https://api-pro.carhunt.fr/v1/listings/search?${q}`,{headers:{Authorization:`Bearer ${key}`}});if(!r.ok){let detail="";try{detail=await r.text()}catch{}throw new Error(`CarHunt HTTP ${r.status}${detail?` — ${detail.slice(0,240)}`:""}`)}const d=await r.json();return Array.isArray(d.listings)?d.listings:[]}
-async function market(t={}){const key=process.env.CARHUNT_API_KEY;if(!key)return{error:"CARHUNT_API_KEY manquante."};const make=up(t.make||"").trim(),model=modelName(t),ty=year(t),tk=km(t),asking=price(t);if(!make||!model)return{error:"Marque et modèle nécessaires."};let raw=await search(key,make,model);const seen=new Set(),list=[];for(const x of raw){const id=x.id||[x.make,x.model,x.year,x.mileage,x.price,x.source_url].join("|");if(seen.has(id))continue;seen.add(id);if(asking!==null&&price(x)===asking&&ty!==null&&year(x)===ty&&tk!==null&&km(x)===tk)continue;if(compatible(t,x))list.push(x)}list.sort((a,b)=>score(t,b)-score(t,a));const top=list.slice(0,20),prices=top.map(price).filter(Number.isFinite);if(prices.length<3)return{asking_display:euro(asking),price_eur:asking,median_display:"Non déterminé",median:null,low_display:"Non déterminé",low:null,high_display:"Non déterminé",high:null,confidence:Math.min(20,prices.length*7),label:"Données de marché insuffisantes",gap_text:`${prices.length} comparable(s) réellement compatible(s). Pas d'estimation artificielle.`,warning:`Seulement ${prices.length} comparable(s) compatibles. L'estimation est volontairement suspendue tant que l'échantillon est trop faible.`,comparables_count:prices.length,comparables:top.slice(0,10).map(comparable)};const med=median(prices),low=quantile(prices,.15),high=quantile(prices,.85),gap=asking!==null&&med?Math.round((asking/med-1)*100):null,label=gap===null?"Marché comparable":gap<=-10?"Très intéressant":gap<=-3?"Plutôt intéressant":gap<=3?"Dans le marché":gap<=10?"Plutôt cher":"Cher",confidence=Math.min(95,45+Math.min(5,prices.length)*8);return{asking_display:euro(asking),price_eur:asking,median_display:euro(med),median:med,low_display:euro(low),low,high_display:euro(high),high,confidence,label,gap_text:gap===null?"Écart au marché non déterminé.":`Le prix demandé est ${Math.abs(gap)}% ${gap>=0?"au-dessus":"en dessous"} du prix médian.`,warning:prices.length<5?"Échantillon encore limité : interpréter la fourchette avec prudence.":null,comparables_count:prices.length,comparables:top.slice(0,10).map(comparable)}}
-function enhance(html){const css=`<style id="vlc-fix">.previews{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:10px!important;width:100%!important}.previews .thumb{width:100%!important;min-width:0!important;height:auto!important;aspect-ratio:1/1!important}.previews .thumb img{width:100%!important;height:100%!important;object-fit:cover!important}.vlc-result{border:2px solid #dfe3e7!important;border-radius:22px!important}.vlc-result.green{background:#ecfdf3!important;border-color:#86efac!important}.vlc-result.blue{background:#eff6ff!important;border-color:#93c5fd!important}.vlc-result.orange{background:#fff7ed!important;border-color:#fdba74!important}.vlc-result.red{background:#fef2f2!important;border-color:#fca5a5!important}.vlc-verdict{display:inline-block;font-size:23px;font-weight:900;padding:10px 16px;border-radius:999px;margin-bottom:10px}.green .vlc-verdict{background:#bbf7d0;color:#166534}.blue .vlc-verdict{background:#dbeafe;color:#1e40af}.orange .vlc-verdict{background:#fed7aa;color:#9a3412}.red .vlc-verdict{background:#fecaca;color:#991b1b}.vlc-gauge-wrap{margin:20px 0;padding:16px;border-radius:20px;background:#fff;border:1px solid #e1e5e9;text-align:center}.vlc-gauge{position:relative;width:min(310px,100%);height:150px;margin:auto;overflow:hidden}.vlc-gauge:before{content:"";position:absolute;left:5%;bottom:-62%;width:90%;height:150%;border-radius:50%;background:conic-gradient(from 270deg,#dc2626 0 60deg,#f59e0b 60deg 105deg,#eab308 105deg 140deg,#22c55e 140deg 180deg,transparent 180deg)}.vlc-gauge:after{content:"";position:absolute;left:10%;bottom:-53%;width:80%;height:133%;border-radius:50%;background:#fff}.vlc-needle{position:absolute;left:50%;bottom:14px;width:5px;height:102px;border-radius:5px;background:#17212b;transform-origin:50% 100%;z-index:3}.vlc-hub{position:absolute;left:50%;bottom:8px;width:20px;height:20px;border-radius:50%;background:#17212b;transform:translateX(-50%);z-index:4}.vlc-gauge-scale{display:flex;justify-content:space-between;font-size:12px;color:#68727d}</style>`;const js=`<script>(function(){function fix(){document.querySelectorAll('.previews').forEach(p=>{p.style.display='grid';p.style.gridTemplateColumns='repeat(3,minmax(0,1fr))';p.style.gap='10px'});document.querySelectorAll('.previews .thumb').forEach(t=>{t.style.width='100%';t.style.minWidth='0';t.style.height='auto';t.style.aspectRatio='1 / 1'});const m=document.getElementById('market');if(!m||m.hidden)return;const s=m.querySelector('.status');if(!s)return;const txt=s.innerText||'';if(!txt)return;const k=txt.includes('Très intéressant')||txt.includes('Plutôt intéressant')?'green':txt.includes('Dans le marché')?'blue':txt.includes('insuffisantes')?'orange':'red';s.classList.add('vlc-result',k);let v=s.querySelector('.vlc-verdict');if(!v){v=document.createElement('div');v.className='vlc-verdict';v.textContent=txt.split('\\n')[0];s.insertBefore(v,s.firstChild)}let old=s.querySelector('.vlc-gauge-wrap');if(old)old.remove();let n=50,gm=txt.match(/prix demandé est (\\d+)% (au-dessus|en dessous)/i);if(gm){const g=Number(gm[1]);n=gm[2].toLowerCase()==='en dessous'?Math.min(100,50+g*2):Math.max(0,50-g*2)}else if(k==='green')n=72;else if(k==='red')n=25;const w=document.createElement('div');w.className='vlc-gauge-wrap';w.innerHTML='<div class="vlc-gauge"><div class="vlc-needle"></div><div class="vlc-hub"></div></div><b>Position du prix</b><div class="vlc-gauge-scale"><span>Trop cher</span><span>Marché</span><span>Très intéressant</span></div>';s.insertBefore(w,s.querySelector('.price')||s.firstChild.nextSibling);w.querySelector('.vlc-needle').style.transform='rotate('+(-90+n*1.8)+'deg)'}new MutationObserver(fix).observe(document.body,{childList:true,subtree:true,characterData:true});setTimeout(fix,100);setTimeout(fix,800);setTimeout(fix,1800)})();</script>`;return html.replace('</head>',css+'</head>').replace('</body>',js+'</body>')}
+const up = v => String(v ?? "").toUpperCase().trim();
+const num = v => {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  const s = String(v ?? "").replace(/\u00a0/g, " ").replace(/[^0-9,.-]/g, "").replace(/\.(?=\d{3}(?:\D|$))/g, "").replace(",", ".");
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+};
+const year = v => num(v?.year);
+const km = v => num(v?.mileage_km ?? v?.mileage ?? v?.mileage_display);
+const price = v => num(v?.price_eur ?? v?.price ?? v?.price_display);
+const text = v => [v?.make, v?.model, v?.version, v?.trim, v?.finition, v?.title, v?.name, v?.description].map(up).join(" ");
+
+function energy(v) {
+  const s = text(v);
+  if (/PHEV|PLUG.?IN|RECHARGEABLE|HYBRIDE\s+RECHARGEABLE/.test(s)) return "phev";
+  if (/HYBRIDE|\bHEV\b/.test(s)) return "hybrid";
+  if (/ELECTRIQUE|\bEV\b/.test(s)) return "ev";
+  if (/ESSENCE|PETROL|GASOLINE|PURETECH|TSI|THP|VTI/.test(s)) return "petrol";
+  if (/DIESEL|BLUEHDI|TDI|DCI|HDi/.test(s)) return "diesel";
+  return null;
+}
+
+function power(v) {
+  const d = num(v?.power_hp ?? v?.power ?? v?.horsepower);
+  if (d !== null && d >= 50 && d <= 1000) return d;
+  const m = text(v).match(/(?:^|\D)(\d{2,3})\s*(?:CH|HP)(?:\D|$)/);
+  return m ? Number(m[1]) : null;
+}
+
+function gearbox(v) {
+  const s = text(v);
+  if (/AUTOMAT|E-CVT|CVT|DSG|EDC|DCT/.test(s)) return "automatic";
+  if (/MANUEL|BVM|MT/.test(s)) return "manual";
+  return null;
+}
+
+function generation(v) {
+  const s = text(v);
+  if (/\b(?:PRIUS\s*(?:5|V)|GEN(?:ERATION)?\s*5|MK\s*5)\b/.test(s)) return 5;
+  if (/\b(?:PRIUS\s*(?:4|IV)|GEN(?:ERATION)?\s*4|MK\s*4)\b/.test(s)) return 4;
+  if (/\b(?:PRIUS\s*(?:3|III)|GEN(?:ERATION)?\s*3|MK\s*3)\b/.test(s)) return 3;
+  const y = year(v);
+  if (/\bPRIUS\b/.test(s) && y !== null && y >= 2023) return 5;
+  return null;
+}
+
+function modelName(v) {
+  return up(v?.model || "")
+    .replace(/\s+(?:IV|III|II|I|[0-9]+)$/i, "")
+    .replace(/\b(?:V|MK\s*[0-9]+)$/i, "")
+    .trim() || "";
+}
+
+function compatible(t, c) {
+  const tm = modelName(t), cm = modelName(c);
+  if (tm && cm && !cm.includes(tm) && !tm.includes(cm)) return false;
+  const tg = generation(t), cg = generation(c);
+  if (tg && cg && tg !== cg) return false;
+  const te = energy(t), ce = energy(c);
+  if (te && ce && te !== ce) return false;
+  const tp = power(t), cp = power(c);
+  if (tp !== null && cp !== null && Math.abs(tp - cp) > 30) return false;
+  const ty = year(t), cy = year(c);
+  if (ty !== null && cy !== null && Math.abs(ty - cy) > 3) return false;
+  const tb = gearbox(t), cb = gearbox(c);
+  if (tb && cb && tb !== cb) return false;
+  const p = price(c);
+  return p !== null && p > 500 && p < 250000;
+}
+
+function score(t, c) {
+  let s = 0;
+  const tg = generation(t), cg = generation(c);
+  const te = energy(t), ce = energy(c);
+  const tp = power(t), cp = power(c);
+  const ty = year(t), cy = year(c);
+  const tk = km(t), ck = km(c);
+  const tb = gearbox(t), cb = gearbox(c);
+  const tm = modelName(t), cm = modelName(c);
+  if (tm && cm && (cm.includes(tm) || tm.includes(cm))) s += 100;
+  if (tg && tg === cg) s += 100;
+  if (te && te === ce) s += 80;
+  if (tb && tb === cb) s += 30;
+  if (tp !== null && cp !== null) s += Math.max(0, 35 - Math.abs(tp - cp));
+  if (ty !== null && cy !== null) s += Math.max(0, 30 - Math.abs(ty - cy) * 7);
+  if (tk !== null && ck !== null) s += Math.max(0, 20 - Math.min(20, Math.abs(tk - ck) / 10000));
+  if (c?.seller_type) s += 2;
+  return s;
+}
+
+const euro = n => n === null ? "Non déterminé" : Math.round(n).toLocaleString("fr-FR") + " €";
+const kmText = n => n === null ? null : Math.round(n).toLocaleString("fr-FR") + " km";
+
+function comparable(c) {
+  const p = price(c), k = km(c), link = c.source_url || c.url || c.link || null;
+  return {
+    price_display: euro(p), price_eur: p, year: c.year ?? null,
+    mileage_display: kmText(k), mileage_km: k,
+    energy: c.energy ?? energy(c), version: c.version || c.finition || c.trim || null,
+    source: c.source ?? null, url: link, link, source_url: link,
+    seller_type: c.seller_type ?? null
+  };
+}
+
+function median(a) {
+  const x = [...a].sort((a, b) => a - b);
+  return x.length ? (x.length % 2 ? x[(x.length - 1) / 2] : (x[x.length / 2 - 1] + x[x.length / 2]) / 2) : null;
+}
+
+function quantile(a, p) {
+  const x = [...a].sort((a, b) => a - b);
+  if (!x.length) return null;
+  if (x.length === 1) return x[0];
+  const i = (x.length - 1) * p, l = Math.floor(i), u = Math.ceil(i);
+  return x[l] + (x[u] - x[l]) * (i - l);
+}
+
+function robustPrices(values) {
+  if (values.length < 6) return values;
+  const q1 = quantile(values, .25), q3 = quantile(values, .75), iqr = q3 - q1;
+  const low = q1 - 1.5 * iqr, high = q3 + 1.5 * iqr;
+  const filtered = values.filter(v => v >= low && v <= high);
+  return filtered.length >= 4 ? filtered : values;
+}
+
+async function search(key, make, model) {
+  const q = new URLSearchParams({ make, model, page_size: "50" });
+  const r = await fetch(`https://api-pro.carhunt.fr/v1/listings/search?${q}`, {
+    headers: { Authorization: `Bearer ${key}` }
+  });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = await r.text(); } catch {}
+    throw new Error(`CarHunt HTTP ${r.status}${detail ? ` — ${detail.slice(0, 240)}` : ""}`);
+  }
+  const d = await r.json();
+  return Array.isArray(d.listings) ? d.listings : [];
+}
+
+async function market(t = {}) {
+  const key = process.env.CARHUNT_API_KEY;
+  if (!key) return { error: "CARHUNT_API_KEY manquante." };
+  const make = up(t.make || "").trim(), model = modelName(t);
+  const ty = year(t), tk = km(t), asking = price(t);
+  if (!make || !model) return { error: "Marque et modèle nécessaires." };
+
+  const raw = await search(key, make, model);
+  const seen = new Set(), list = [];
+  for (const x of raw) {
+    const id = x.id || [x.make, x.model, x.year, x.mileage, x.price, x.source_url].join("|");
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const px = price(x), ky = km(x), yy = year(x);
+    if (asking !== null && px === asking && ty !== null && yy === ty && tk !== null && ky === tk) continue;
+    if (compatible(t, x)) list.push(x);
+  }
+
+  list.sort((a, b) => score(t, b) - score(t, a));
+  const top = list.slice(0, 20);
+  const rawPrices = top.map(price).filter(Number.isFinite);
+  const prices = robustPrices(rawPrices);
+
+  if (prices.length < 3) {
+    return {
+      asking_display: euro(asking), price_eur: asking,
+      median_display: "Non déterminé", median: null,
+      low_display: "Non déterminé", low: null,
+      high_display: "Non déterminé", high: null,
+      confidence: Math.min(35, 15 + prices.length * 7),
+      label: "Données de marché insuffisantes",
+      gap_text: `${prices.length} comparable(s) réellement compatible(s). Pas d'estimation artificielle.`,
+      warning: `Seulement ${prices.length} comparable(s) compatibles. L'estimation de prix est volontairement suspendue tant que l'échantillon est trop faible.`,
+      comparables_count: prices.length,
+      comparables: top.slice(0, 10).map(comparable)
+    };
+  }
+
+  const med = median(prices), low = quantile(prices, .15), high = quantile(prices, .85);
+  const gap = asking !== null && med ? Math.round((asking / med - 1) * 100) : null;
+  const label = gap === null ? "Marché comparable" : gap <= -10 ? "Très intéressant" : gap <= -3 ? "Plutôt intéressant" : gap <= 3 ? "Dans le marché" : gap <= 10 ? "Plutôt cher" : "Cher";
+  const confidence = Math.min(95, 42 + Math.min(10, prices.length) * 5 + (prices.length >= 6 ? 5 : 0));
+
+  return {
+    asking_display: euro(asking), price_eur: asking,
+    median_display: euro(med), median: med,
+    low_display: euro(low), low, high_display: euro(high), high,
+    confidence, label,
+    gap_text: gap === null ? "Écart au marché non déterminé." : `Le prix demandé est ${Math.abs(gap)}% ${gap >= 0 ? "au-dessus" : "en dessous"} du prix médian.`,
+    warning: prices.length < 5 ? "Échantillon encore limité : interpréter la fourchette avec prudence." : rawPrices.length !== prices.length ? "Quelques valeurs extrêmes ont été écartées du calcul pour éviter de fausser la médiane." : null,
+    comparables_count: prices.length,
+    comparables: top.slice(0, 10).map(comparable)
+  };
+}
+
+function enhance(html) {
+  const css = `<style id="vlc-fix">.previews{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:10px!important;width:100%!important}.previews .thumb{width:100%!important;min-width:0!important;height:auto!important;aspect-ratio:1/1!important}.previews .thumb img{width:100%!important;height:100%!important;object-fit:cover!important}.vlc-result{border:2px solid #dfe3e7!important;border-radius:22px!important}.vlc-result.green{background:#ecfdf3!important;border-color:#86efac!important}.vlc-result.blue{background:#eff6ff!important;border-color:#93c5fd!important}.vlc-result.orange{background:#fff7ed!important;border-color:#fdba74!important}.vlc-result.red{background:#fef2f2!important;border-color:#fca5a5!important}.vlc-verdict{display:inline-block;font-size:23px;font-weight:900;padding:10px 16px;border-radius:999px;margin-bottom:10px}.green .vlc-verdict{background:#bbf7d0;color:#166534}.blue .vlc-verdict{background:#dbeafe;color:#1e40af}.orange .vlc-verdict{background:#fed7aa;color:#9a3412}.red .vlc-verdict{background:#fecaca;color:#991b1b}.vlc-gauge-wrap{margin:20px 0;padding:16px;border-radius:20px;background:#fff;border:1px solid #e1e5e9;text-align:center}.vlc-gauge{position:relative;width:min(310px,100%);height:150px;margin:auto;overflow:hidden}.vlc-gauge:before{content:"";position:absolute;left:5%;bottom:-62%;width:90%;height:150%;border-radius:50%;background:conic-gradient(from 270deg,#dc2626 0 60deg,#f59e0b 60deg 105deg,#eab308 105deg 140deg,#22c55e 140deg 180deg,transparent 180deg)}.vlc-gauge:after{content:"";position:absolute;left:10%;bottom:-53%;width:80%;height:133%;border-radius:50%;background:#fff}.vlc-needle{position:absolute;left:50%;bottom:14px;width:5px;height:102px;border-radius:5px;background:#17212b;transform-origin:50% 100%;z-index:3}.vlc-hub{position:absolute;left:50%;bottom:8px;width:20px;height:20px;border-radius:50%;background:#17212b;transform:translateX(-50%);z-index:4}.vlc-gauge-scale{display:flex;justify-content:space-between;font-size:12px;color:#68727d}</style>`;
+  const js = `<script>(function(){function fix(){document.querySelectorAll('.previews').forEach(p=>{p.style.display='grid';p.style.gridTemplateColumns='repeat(3,minmax(0,1fr))';p.style.gap='10px'});document.querySelectorAll('.previews .thumb').forEach(t=>{t.style.width='100%';t.style.minWidth='0';t.style.height='auto';t.style.aspectRatio='1 / 1'});const m=document.getElementById('market');if(!m||m.hidden)return;const s=m.querySelector('.status');if(!s)return;const txt=s.innerText||'';if(!txt)return;const k=txt.includes('Très intéressant')||txt.includes('Plutôt intéressant')?'green':txt.includes('Dans le marché')?'blue':txt.includes('insuffisantes')?'orange':'red';s.classList.add('vlc-result',k);let v=s.querySelector('.vlc-verdict');if(!v){v=document.createElement('div');v.className='vlc-verdict';v.textContent=txt.split('\\n')[0];s.insertBefore(v,s.firstChild)}let old=s.querySelector('.vlc-gauge-wrap');if(old)old.remove();let n=50,gm=txt.match(/prix demandé est (\\d+)% (au-dessus|en dessous)/i);if(gm){const g=Number(gm[1]);n=gm[2].toLowerCase()==='en dessous'?Math.min(100,50+g*2):Math.max(0,50-g*2)}else if(k==='green')n=72;else if(k==='red')n=25;const w=document.createElement('div');w.className='vlc-gauge-wrap';w.innerHTML='<div class="vlc-gauge"><div class="vlc-needle"></div><div class="vlc-hub"></div></div><b>Position du prix</b><div class="vlc-gauge-scale"><span>Trop cher</span><span>Marché</span><span>Très intéressant</span></div>';s.insertBefore(w,s.querySelector('.price')||s.firstChild.nextSibling);w.querySelector('.vlc-needle').style.transform='rotate('+(-90+n*1.8)+'deg)'}new MutationObserver(fix).observe(document.body,{childList:true,subtree:true,characterData:true});setTimeout(fix,100);setTimeout(fix,800);setTimeout(fix,1800)})();</script>`;
+  return html.replace('</head>',css+'</head>').replace('</body>',js+'</body>');
+}
+
 app.post('/api/market',(req,res)=>market(req.body).then(x=>res.status(x.error?500:200).json(x)).catch(e=>{console.error(e);res.status(500).json({error:e.message})}));
-function proxy(req,res){const o={hostname:'127.0.0.1',port:INTERNAL_PORT,path:req.url,method:req.method,headers:{...req.headers,host:`127.0.0.1:${INTERNAL_PORT}`}};const u=http.request(o,r=>{const b=[];r.on('data',c=>b.push(c));r.on('end',()=>{const body=Buffer.concat(b),type=String(r.headers['content-type']||'');if(req.method==='GET'&&req.url==='/'&&type.includes('text/html')){const out=enhance(body.toString());const h={...r.headers,'content-length':Buffer.byteLength(out),'cache-control':'no-store'};delete h['content-encoding'];res.writeHead(r.statusCode||200,h);res.end(out)}else{res.writeHead(r.statusCode||200,r.headers);res.end(body)}})});u.on('error',e=>{res.statusCode=502;res.end(`Backend indisponible: ${e.message}`)});req.pipe(u)}
+
+function proxy(req,res){
+  const o={hostname:'127.0.0.1',port:INTERNAL_PORT,path:req.url,method:req.method,headers:{...req.headers,host:`127.0.0.1:${INTERNAL_PORT}`}};
+  const u=http.request(o,r=>{const b=[];r.on('data',c=>b.push(c));r.on('end',()=>{const body=Buffer.concat(b),type=String(r.headers['content-type']||'');if(req.method==='GET'&&req.url==='/'&&type.includes('text/html')){const out=enhance(body.toString());const h={...r.headers,'content-length':Buffer.byteLength(out),'cache-control':'no-store'};delete h['content-encoding'];res.writeHead(r.statusCode||200,h);res.end(out)}else{res.writeHead(r.statusCode||200,r.headers);res.end(body)}})});u.on('error',e=>{res.statusCode=502;res.end(`Backend indisponible: ${e.message}`)});req.pipe(u)
+}
+
 app.use(proxy);
-const child=spawn(process.execPath,['server.js'],{env:{...process.env,PORT:String(INTERNAL_PORT)},stdio:'inherit'});child.on('exit',(c,s)=>{if(c!==0&&c!==null)process.exit(c);if(s)process.exit(1)});
+const child=spawn(process.execPath,['server.js'],{env:{...process.env,PORT:String(INTERNAL_PORT)},stdio:'inherit'});
+child.on('exit',(c,s)=>{if(c!==0&&c!==null)process.exit(c);if(s)process.exit(1)});
 function wait(){return new Promise(resolve=>{const go=()=>{const r=http.get(`${TARGET}/`,x=>{x.resume();resolve()});r.on('error',()=>setTimeout(go,150));r.setTimeout(1500,()=>r.destroy())};go()})}
-await wait();http.createServer(app).listen(PORT,'0.0.0.0',()=>console.log(`Vaut le Coup wrapper listening on ${PORT}`));
+await wait();
+http.createServer(app).listen(PORT,'0.0.0.0',()=>console.log(`Vaut le Coup wrapper listening on ${PORT}`));
