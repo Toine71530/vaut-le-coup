@@ -12,9 +12,10 @@ function norm(value) {
   return stripAccents(value).toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
 }
 
-// CarHunt accepte au maximum 50 résultats par page dans l'API réellement servie.
-// On garde cette règle ici pour éviter qu'une ancienne version de app.js puisse
-// renvoyer un HTTP 422 sur page_size=100.
+// CarHunt réellement servi : maximum 50 résultats par page.
+// On récupère plusieurs pages pour éviter qu'un modèle très diffus (ex. C3)
+// ne soit déclaré "sans comparable" simplement parce que les 50 premiers
+// résultats couvrent d'autres millésimes/kilométrages.
 globalThis.fetch = async function patchedFetch(input, init) {
   let url;
   try { url = new URL(typeof input === 'string' ? input : input.url); }
@@ -27,7 +28,45 @@ globalThis.fetch = async function patchedFetch(input, init) {
     if (model) url.searchParams.set('model', norm(model));
     const pageSize = Number(url.searchParams.get('page_size'));
     if (!Number.isFinite(pageSize) || pageSize > 50) url.searchParams.set('page_size', '50');
-    return nativeFetch(url, init);
+    if (!url.searchParams.has('page')) url.searchParams.set('page', '1');
+
+    const first = await nativeFetch(url, init);
+    if (!first.ok) return first;
+
+    try {
+      const firstData = await first.clone().json();
+      const firstListings = Array.isArray(firstData?.listings) ? firstData.listings : [];
+      const total = Number(firstData?.total || 0);
+      const pages = Math.min(4, Math.max(1, Math.ceil(total / 50)));
+      if (pages <= 1 || firstListings.length >= total) return first;
+
+      const all = [...firstListings];
+      const seen = new Set(firstListings.map(x => x?.id || x?.source_url).filter(Boolean));
+      for (let page = 2; page <= pages; page++) {
+        const nextUrl = new URL(url);
+        nextUrl.searchParams.set('page', String(page));
+        nextUrl.searchParams.set('page_size', '50');
+        const next = await nativeFetch(nextUrl, init);
+        if (!next.ok) break;
+        const nextData = await next.json().catch(() => null);
+        const rows = Array.isArray(nextData?.listings) ? nextData.listings : [];
+        for (const row of rows) {
+          const key = row?.id || row?.source_url || JSON.stringify(row);
+          if (!seen.has(key)) { seen.add(key); all.push(row); }
+        }
+        if (rows.length < 50) break;
+      }
+
+      const merged = { ...firstData, listings: all, page: 1, page_size: 50, pages_fetched: pages };
+      return new Response(JSON.stringify(merged), {
+        status: first.status,
+        statusText: first.statusText,
+        headers: first.headers
+      });
+    } catch (error) {
+      console.error('CarHunt pagination enrichment error', error?.message || error);
+      return first;
+    }
   }
 
   // Contexte temporel explicite pour éviter les faux avertissements Gemini.
@@ -122,7 +161,7 @@ express.response.json = function patchedJson(payload) {
   return originalJson.call(this, payload);
 };
 
-// Injecte une petite couche UI qui récupère l'objet negotiation de /api/market.
+// Injecte la couche UI de l'axe de négociation.
 express.response.send = function patchedSend(body) {
   if (typeof body === 'string' && body.includes('</body>') && body.includes('Vaut le Coup ?')) {
     const injection = `<section id="negotiation" class="card" hidden></section>
