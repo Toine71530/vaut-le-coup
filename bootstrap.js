@@ -12,10 +12,6 @@ function norm(value) {
   return stripAccents(value).toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
 }
 
-// CarHunt réellement servi : maximum 50 résultats par page.
-// On récupère plusieurs pages pour éviter qu'un modèle très diffus (ex. C3)
-// ne soit déclaré "sans comparable" simplement parce que les 50 premiers
-// résultats couvrent d'autres millésimes/kilométrages.
 globalThis.fetch = async function patchedFetch(input, init) {
   let url;
   try { url = new URL(typeof input === 'string' ? input : input.url); }
@@ -69,7 +65,6 @@ globalThis.fetch = async function patchedFetch(input, init) {
     }
   }
 
-  // Contexte temporel explicite pour éviter les faux avertissements Gemini.
   if (url.hostname === 'generativelanguage.googleapis.com' && url.pathname.includes('/models/') && url.pathname.endsWith(':generateContent') && init?.body) {
     try {
       const body = JSON.parse(init.body);
@@ -85,7 +80,8 @@ globalThis.fetch = async function patchedFetch(input, init) {
   return nativeFetch(input, init);
 };
 
-// Enrichit la réponse marché avec l'axe de négociation.
+// Une voiture déjà très sous le marché ne doit pas être artificiellement tirée
+// encore 5 à 10 % plus bas : l'axe doit rester une négociation réaliste.
 function buildNegotiation(vehicle, market) {
   const asking = Number(vehicle?.price_eur ?? market?.asking);
   const median = Number(market?.median);
@@ -97,58 +93,78 @@ function buildNegotiation(vehicle, market) {
   const comparables = Number(market?.comparables || 0);
   const gapPct = Number.isFinite(Number(market?.gap_pct)) ? Number(market.gap_pct) : ((median - asking) / median) * 100;
   const seller = vehicle?.seller_type;
-
-  let riskDiscount = Math.min(0.06,
-    Math.min(warnings.length, 4) * 0.0075 +
-    Math.min(uncertain.length, 4) * 0.003 +
-    (comparables > 0 && comparables < 8 ? 0.005 : 0)
-  );
-  if (seller === 'professional') riskDiscount *= 0.75;
-
   const round50 = n => Math.round(n / 50) * 50;
-  let target, opening, ceiling, position;
-  if (asking > median) {
-    position = 'au-dessus_du_marche';
-    target = median * (1 - riskDiscount);
-    opening = target * (seller === 'private' ? 0.965 : 0.975);
-    ceiling = median;
-  } else if (asking < median * 0.97) {
-    position = 'sous_le_marche';
-    target = asking * (1 - Math.min(0.025 + riskDiscount, 0.05));
-    opening = target * (seller === 'private' ? 0.97 : 0.985);
+
+  const risk = Math.min(0.025,
+    Math.min(warnings.length, 2) * 0.005 +
+    Math.min(uncertain.length, 2) * 0.0025
+  );
+
+  let opening, target, ceiling, position, negotiationMode;
+  if (gapPct >= 20) {
+    position = 'tres_sous_le_marche';
+    negotiationMode = 'prix_deja_tres_attractif';
+    target = asking * (1 - Math.min(risk, 0.01));
+    opening = asking * (1 - Math.min(0.01 + risk, 0.02));
     ceiling = asking;
-  } else {
+  } else if (gapPct >= 7) {
+    position = 'sous_le_marche';
+    negotiationMode = 'petit_geste';
+    target = asking * (1 - Math.min(0.01 + risk, 0.02));
+    opening = asking * (1 - Math.min(0.02 + risk, 0.03));
+    ceiling = asking;
+  } else if (gapPct > -7) {
     position = 'dans_le_marche';
-    target = Math.min(asking * 0.985, median * (1 - riskDiscount));
-    opening = target * (seller === 'private' ? 0.97 : 0.985);
+    negotiationMode = 'negociation_normale';
+    target = Math.min(asking * (1 - Math.min(0.015 + risk, 0.03)), median);
+    opening = target * (seller === 'private' ? 0.985 : 0.99);
     ceiling = Math.min(asking, median);
+  } else {
+    position = 'au_dessus_du_marche';
+    negotiationMode = 'negociation_ferme';
+    target = Math.min(median * (1 + Math.min(risk, 0.02)), asking * (1 - Math.min(0.025 + risk, 0.05)));
+    opening = target * (seller === 'private' ? 0.975 : 0.985);
+    ceiling = Math.min(asking, median * 1.02);
   }
+
   target = Math.max(0, round50(target));
   opening = Math.max(0, Math.min(target, round50(opening)));
   ceiling = Math.max(opening, round50(ceiling));
 
   const args = [];
-  if (gapPct > 2) args.push(`Le prix demandé est environ ${Math.abs(gapPct).toFixed(1).replace('.', ',')} % au-dessus de la médiane des comparables.`);
-  else if (gapPct < -2) args.push(`Le prix demandé est déjà environ ${Math.abs(gapPct).toFixed(1).replace('.', ',')} % sous la médiane : éviter une négociation artificielle.`);
-  else args.push('Le prix est proche de la médiane : négocier principalement sur les éléments concrets à vérifier.');
-  if (warnings.length) args.push(`${warnings.length} point(s) de vigilance peuvent servir d'argument s'ils sont vérifiés lors de la visite.`);
-  if (uncertain.length) args.push(`${uncertain.length} information(s) restent incertaines : demander les justificatifs avant d'atteindre le plafond.`);
+  if (gapPct >= 20) {
+    args.push(`Le prix demandé est déjà environ ${Math.abs(gapPct).toFixed(1).replace('.', ',')} % sous la médiane des comparables : éviter une négociation agressive.`);
+  } else if (gapPct >= 7) {
+    args.push(`Le prix demandé est environ ${Math.abs(gapPct).toFixed(1).replace('.', ',')} % sous la médiane : demander seulement un petit geste si la visite confirme l'état annoncé.`);
+  } else if (gapPct > -7) {
+    args.push('Le prix est proche du marché : négocier surtout sur les éléments concrets vérifiés lors de la visite.');
+  } else {
+    args.push(`Le prix demandé est environ ${Math.abs(gapPct).toFixed(1).replace('.', ',')} % au-dessus de la médiane : une négociation plus ferme est justifiée.`);
+  }
+  if (warnings.length) args.push(`${warnings.length} point(s) de vigilance peuvent servir d'argument uniquement s'ils sont vérifiés lors de la visite.`);
+  if (uncertain.length) args.push(`${uncertain.length} information(s) restent incertaines : demander les justificatifs avant de négocier sur ce point.`);
   if (comparables) args.push(`La comparaison repose sur ${comparables} annonce(s) retenue(s) comme comparable(s).`);
-  if (seller === 'private') args.push('Particulier : privilégier une offre ferme, argumentée et conditionnée à la visite et aux justificatifs.');
-  if (seller === 'professional') args.push('Professionnel : négocier aussi garantie, prestations incluses et travaux à venir.');
+  if (seller === 'private') args.push('Particulier : proposer un montant simple et cohérent, sans inventer de défaut.');
+  if (seller === 'professional') args.push('Professionnel : négocier aussi, si nécessaire, une prestation ou une garantie plutôt qu’une forte remise injustifiée.');
 
-  const phrase = opening < asking
-    ? `« Le véhicule m'intéresse. Au vu du marché et des points à vérifier, je peux vous proposer ${opening.toLocaleString('fr-FR')} € si tout est conforme lors de la visite. »`
-    : `« Le prix me paraît cohérent. Si tout est conforme lors de la visite, pouvez-vous faire un geste pour arriver à ${target.toLocaleString('fr-FR')} € ? »`;
+  let phrase;
+  if (gapPct >= 20) {
+    phrase = `« Le prix est déjà très bien placé par rapport au marché. Si tout est conforme lors de la visite, je peux vous proposer ${opening.toLocaleString('fr-FR')} € pour conclure rapidement. »`;
+  } else if (opening < asking) {
+    phrase = `« Le véhicule m'intéresse. Au vu du marché et des points à vérifier, je peux vous proposer ${opening.toLocaleString('fr-FR')} € si tout est conforme lors de la visite. »`;
+  } else {
+    phrase = `« Le prix me paraît cohérent. Si tout est conforme lors de la visite, pouvez-vous faire un petit geste pour arriver à ${target.toLocaleString('fr-FR')} € ? »`;
+  }
 
   return {
-    available: true, position, asking: round50(asking), opening_offer: opening,
+    available: true, position, negotiation_mode: negotiationMode,
+    asking: round50(asking), opening_offer: opening,
     target_price: target, ceiling_price: ceiling,
     potential_saving: Math.max(0, round50(asking - target)),
     market_gap_pct: Math.round(gapPct * 10) / 10,
-    risk_discount_pct: Math.round(riskDiscount * 1000) / 10,
+    risk_discount_pct: Math.round(risk * 1000) / 10,
     arguments: args.slice(0, 8), suggested_phrase: phrase,
-    rule: 'Repères de négociation, pas garantie du prix obtenu. Ne jamais négocier un défaut non vérifié.'
+    rule: 'Repères de négociation, pas garantie du prix obtenu. Plus le prix est déjà sous le marché, plus la négociation doit rester légère. Ne jamais négocier un défaut non vérifié.'
   };
 }
 
@@ -161,7 +177,6 @@ express.response.json = function patchedJson(payload) {
   return originalJson.call(this, payload);
 };
 
-// Injecte la couche UI de l'axe de négociation.
 express.response.send = function patchedSend(body) {
   if (typeof body === 'string' && body.includes('</body>') && body.includes('Vaut le Coup ?')) {
     const injection = `<section id="negotiation" class="card" hidden></section>
