@@ -19,32 +19,21 @@ function cleanAnalysisPayload(payload) {
   const energy = String(vehicle?.energy || '').toLowerCase();
   const power = num(vehicle?.power_hp ?? vehicle?.power);
 
-  // Certaines fiches n'affichent pas explicitement la puissance dans la capture,
-  // mais la combinaison modèle + année + motorisation permet une identification
-  // déterministe de la puissance système. On ne l'applique qu'à des cas précis.
-  if (make.includes('toyota') && model === 'prius' &&
-      Number(vehicle?.year) === 2023 &&
-      (energy.includes('rechargeable') || version.includes('phev')) &&
-      power == null) {
+  if (make.includes('toyota') && model === 'prius' && Number(vehicle?.year) === 2023 &&
+      (energy.includes('rechargeable') || version.includes('phev')) && power == null) {
     vehicle.power_hp = 223;
     if (Array.isArray(vehicle.visible_claims) && !vehicle.visible_claims.some(x => String(x).toLowerCase().includes('223 ch'))) {
       vehicle.visible_claims.push('Toyota Prius PHEV 2023 : puissance système 223 ch déduite de la motorisation/année identifiées.');
     }
   }
 
-  // Même logique pour la Corolla 122h : 122 ch est la puissance système,
-  // sans confondre avec les 98 ch DIN du moteur thermique.
-  if (make.includes('toyota') && model.includes('corolla') &&
-      energy.includes('hybrid') && version.includes('122h') && power == null) {
+  if (make.includes('toyota') && model.includes('corolla') && energy.includes('hybrid') && version.includes('122h') && power == null) {
     vehicle.power_hp = 122;
     if (Array.isArray(vehicle.visible_claims) && !vehicle.visible_claims.some(x => String(x).toLowerCase().includes('122 ch'))) {
       vehicle.visible_claims.push('Toyota Corolla 122h : puissance système 122 ch identifiée par la version 122h.');
     }
   }
 
-  // Toyota Corolla 1.8 Hybrid 122h : 122 ch correspond à la puissance système,
-  // tandis que 98 ch DIN correspond à la puissance du moteur thermique.
-  // Ce n'est donc pas une contradiction à signaler.
   const isCorolla122h = make.includes('toyota') && model.includes('corolla') &&
     energy.includes('hybrid') && (version.includes('122h') || power === 122);
 
@@ -56,7 +45,6 @@ function cleanAnalysisPayload(payload) {
       /98\s*ch.*122h.*contradiction/i,
       /122h.*98\s*ch.*contradiction/i
     ];
-
     for (const key of ['warnings', 'points_of_attention', 'vigilance']) {
       if (Array.isArray(payload[key])) {
         payload[key] = payload[key].filter(item => {
@@ -79,17 +67,14 @@ function sameVehicle(comp, vehicle) {
   const modelB = norm(vehicle.model);
   if (!makeA || !makeB || !makeA.includes(makeB) && !makeB.includes(makeA)) return false;
   if (!modelA || !modelB || !modelA.includes(modelB) && !modelB.includes(modelA)) return false;
-
   const yearA = num(comp.year);
   const yearB = num(vehicle.year);
   const kmA = num(comp.mileage ?? comp.mileage_km);
   const kmB = num(vehicle.mileage_km);
   const priceA = num(comp.price ?? comp.price_eur);
   const priceB = num(vehicle.price_eur);
-
-  return yearA != null && yearB != null && yearA === yearB &&
-    kmA != null && kmB != null && Math.abs(kmA - kmB) <= 100 &&
-    priceA != null && priceB != null && Math.abs(priceA - priceB) < 1;
+  return yearA != null && yearB != null && yearA === yearB && kmA != null && kmB != null &&
+    Math.abs(kmA - kmB) <= 100 && priceA != null && priceB != null && Math.abs(priceA - priceB) < 1;
 }
 
 function median(values) {
@@ -107,113 +92,91 @@ function percentile(values, p) {
 
 function applyTargetExclusion(payload, vehicle) {
   if (!Array.isArray(payload?.sample) || !payload.sample.length) return payload;
-
   const filtered = payload.sample.filter(comp => !sameVehicle(comp, vehicle));
   const removed = payload.sample.length - filtered.length;
   if (!removed) return payload;
-
-  // Le serveur CarHunt ne nous expose ici qu'un échantillon. Si la cible est
-  // présente dans cet échantillon, on recalcule les indicateurs sur les annonces
-  // réellement distinctes plutôt que de laisser la cible gonfler le résultat.
   const prices = filtered.map(x => num(x.price)).filter(x => x > 0);
   const med = median(prices);
   const asking = num(vehicle?.price_eur ?? payload.asking);
-
   if (!prices.length || med == null) {
-    return {
-      ...payload,
-      comparables: Math.max(0, Number(payload.comparables || 0) - removed),
-      median: null,
-      low: null,
-      high: null,
-      score: null,
-      label: 'Marché insuffisant',
-      gap_pct: null,
-      gap_eur: null,
-      warning: 'Annonce cible exclue : échantillon distinct insuffisant pour produire un verdict fiable.',
-      sample: filtered
-    };
+    return { ...payload, comparables: Math.max(0, Number(payload.comparables || 0) - removed), median: null, low: null, high: null, score: null,
+      label: 'Marché insuffisant', gap_pct: null, gap_eur: null,
+      warning: 'Annonce cible exclue : échantillon distinct insuffisant pour produire un verdict fiable.', sample: filtered };
   }
-
   const gap = asking > 0 ? ((med - asking) / med) * 100 : null;
   const score = gap == null ? null : Math.max(0, Math.min(100, Math.round(50 + gap * 2.5)));
   const label = score == null ? 'Marché comparable' : score >= 80 ? '🔥 Très bonne affaire' : score >= 65 ? '👍 Prix très intéressant' : score >= 55 ? '🟢 Plutôt intéressant' : score >= 45 ? '🟡 Dans le marché' : score >= 35 ? '🟠 Plutôt cher' : '🔴 Cher';
-
-  return {
-    ...payload,
-    comparables: Math.max(0, Number(payload.comparables || 0) - removed),
-    median: Math.round(med),
-    low: Math.round(percentile(prices, .15)),
-    high: Math.round(percentile(prices, .85)),
-    score,
-    label,
-    gap_pct: gap == null ? null : Math.round(gap * 10) / 10,
-    gap_eur: gap == null ? null : Math.round(med - asking),
+  return { ...payload, comparables: Math.max(0, Number(payload.comparables || 0) - removed), median: Math.round(med),
+    low: Math.round(percentile(prices, .15)), high: Math.round(percentile(prices, .85)), score, label,
+    gap_pct: gap == null ? null : Math.round(gap * 10) / 10, gap_eur: gap == null ? null : Math.round(med - asking),
     warning: prices.length < 8 ? `Échantillon limité (${prices.length} comparables distincts) : les repères de prix sont indicatifs.` : payload.warning,
-    sample: filtered
-  };
+    sample: filtered };
+}
+
+function allVehicleText(vehicle) {
+  const arrays = ['visible_claims', 'warnings', 'uncertain_fields'];
+  return [vehicle?.title, vehicle?.version, vehicle?.energy, ...arrays.flatMap(k => Array.isArray(vehicle?.[k]) ? vehicle[k] : [])]
+    .map(x => String(x ?? '').toLowerCase()).join(' ');
+}
+
+function hasPlaceContradiction(vehicle) {
+  const text = allVehicleText(vehicle);
+  const hasTwo = /\b2\s*places?\b/.test(text);
+  const hasFive = /\b5\s*places?\b/.test(text);
+  return hasTwo && hasFive;
+}
+
+function isVaspTwoSeat(vehicle) {
+  const places = num(vehicle?.places ?? vehicle?.seats ?? vehicle?.number_of_seats);
+  const text = allVehicleText(vehicle);
+  return /\bvasp\b/.test(text) && /\butilitaire\b/.test(text) && /\b2\s*places?\b/.test(text) ||
+    places === 2 && /\b(?:vasp|utilitaire)\b/.test(text);
+}
+
+function blockMarket(payload, reason, label = 'Marché non fiable') {
+  return { ...payload, median: null, low: null, high: null, score: null, label, gap_pct: null, gap_eur: null,
+    warning: reason, market_safety: { level: 'unknown', suspicious: false },
+    negotiation: { available: false, reason: 'Pas de négociation chiffrée tant que la configuration du véhicule n’est pas suffisamment fiable.' } };
 }
 
 express.response.json = function marketPolicyJson(payload) {
   try {
-    if (this.req?.path === '/api/analyze') {
-      payload = cleanAnalysisPayload(payload);
-    }
+    if (this.req?.path === '/api/analyze') payload = cleanAnalysisPayload(payload);
 
     if (this.req?.path === '/api/market' && payload?.ok) {
       const vehicle = this.req.body || {};
       payload = applyTargetExclusion(payload, vehicle);
       const comparables = Number(payload.comparables || 0);
 
-      // 0–4 annonces : impossible de produire un verdict de prix sérieux.
-      if (Number.isFinite(comparables) && comparables < 5) {
-        payload = {
-          ...payload,
-          median: null,
-          low: null,
-          high: null,
-          score: null,
-          label: 'Marché insuffisant',
-          gap_pct: null,
-          gap_eur: null,
-          warning: 'Échantillon trop limité : aucun verdict de prix fiable ne doit être donné.',
-          market_safety: { level: 'unknown', suspicious: false },
-          negotiation: {
-            available: false,
-            reason: 'Pas assez d’annonces comparables pour établir un axe de négociation fiable.'
-          }
-        };
+      // Une contradiction de configuration invalide toute comparaison : il faut
+      // d'abord vérifier la carte grise et la configuration réelle.
+      if (hasPlaceContradiction(vehicle)) {
+        payload = blockMarket(payload,
+          'Comparaison bloquée : l’annonce contient une contradiction sur le nombre de places (2 et 5). Vérifier la carte grise et la configuration réelle avant toute comparaison de prix.');
+      // Un VASP/utilitaire 2 places ne doit jamais être comparé à une Corolla
+      // particulière/familiale 5 places. CarHunt ne fournit pas ici un filtre
+      // suffisamment fiable sur la carrosserie VASP et le nombre de places.
+      } else if (isVaspTwoSeat(vehicle)) {
+        payload = blockMarket(payload,
+          'Comparaison bloquée : véhicule VASP/utilitaire 2 places. Les annonces 5 places ne sont pas des comparables fiables. Aucun verdict de prix n’est donné sans échantillon VASP 2 places réellement comparable.',
+          'Marché 2 places non comparable');
+      } else if (comparables < 5) {
+        payload = blockMarket(payload,
+          'Échantillon trop limité : aucun verdict de prix fiable ne doit être donné.', 'Marché insuffisant');
       }
 
-      // 5–7 annonces : chiffres utiles comme repères, mais aucun axe de
-      // négociation chiffré. Cette règle est appliquée ici en dernier recours
-      // afin qu'aucune couche antérieure ne puisse réactiver la négociation.
-      if (Number.isFinite(comparables) && comparables >= 5 && comparables < 8) {
+      const finalComparables = Number(payload.comparables || 0);
+      if (finalComparables >= 5 && finalComparables < 8 && payload.label !== 'Marché 2 places non comparable' && payload.label !== 'Marché non fiable') {
         const originalScore = Number(payload.score);
-        payload = {
-          ...payload,
-          score: Number.isFinite(originalScore) ? Math.min(originalScore, 65) : originalScore,
+        payload = { ...payload, score: Number.isFinite(originalScore) ? Math.min(originalScore, 65) : originalScore,
           label: '🟡 Marché indicatif — échantillon limité',
-          warning: `Échantillon limité (${comparables} comparables) : les repères de prix sont indicatifs. Un verdict ferme nécessite au moins 8 comparables réellement pertinents.`,
-          market_safety: {
-            ...(payload.market_safety || {}),
-            level: 'indicative',
-            suspicious: false
-          },
-          negotiation: {
-            available: false,
-            reason: 'Échantillon encore trop limité pour fixer une offre cible fiable. Utiliser la médiane comme simple repère et vérifier le véhicule.'
-          }
-        };
+          warning: `Échantillon limité (${finalComparables} comparables) : les repères de prix sont indicatifs. Un verdict ferme nécessite au moins 8 comparables réellement pertinents.`,
+          market_safety: { ...(payload.market_safety || {}), level: 'indicative', suspicious: false },
+          negotiation: { available: false, reason: 'Échantillon encore trop limité pour fixer une offre cible fiable. Utiliser la médiane comme simple repère et vérifier le véhicule.' } };
       }
 
-      // Sécurité supplémentaire : aucun axe de négociation si l'échantillon
-      // final reste inférieur à 8 annonces distinctes.
       if (Number(payload.comparables || 0) < 8) {
-        payload.negotiation = {
-          available: false,
-          reason: 'Axe de négociation masqué : moins de 8 annonces comparables distinctes après exclusion de l’annonce cible.'
-        };
+        payload.negotiation = { available: false, reason: 'Axe de négociation masqué : moins de 8 annonces comparables distinctes après exclusion de l’annonce cible.' };
       }
     }
   } catch (error) {
