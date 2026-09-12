@@ -1,109 +1,77 @@
 import express from "express";
-import cors from "cors";
 import multer from "multer";
 
 const app = express();
+const PORT = Number(process.env.PORT || 10000);
 const upload = multer({ storage: multer.memoryStorage(), limits: { files: 3, fileSize: 12 * 1024 * 1024 } });
-app.use(cors());
-app.use(express.json({ limit: "2mb" }));
-
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash-lite";
+const CARHUNT_API_KEY = process.env.CARHUNT_API_KEY || "";
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const cleanJson = text => {
-  const s = String(text || "").trim().replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-  const a = s.indexOf("{"), b = s.lastIndexOf("}");
-  if (a < 0 || b <= a) throw new Error("Réponse IA JSON invalide.");
-  return JSON.parse(s.slice(a, b + 1));
-};
-
-async function callGemini(model, files, attempt) {
-  const prompt = `Tu es le moteur de lecture de l'application française "Vaut le Coup ?". Analyse les photos/captures d'une même annonce automobile et recoupe les informations entre elles. N'invente jamais une donnée. Si une donnée est absente, illisible ou contradictoire, mets null et ajoute le champ dans uncertain_fields. Le prix doit être celui de l'annonce. Retourne UNIQUEMENT un objet JSON valide avec exactement ces clés : {"make":string|null,"model":string|null,"version":string|null,"year":number|null,"mileage_km":number|null,"price_eur":number|null,"energy":string|null,"gearbox":string|null,"power_hp":number|null,"seller_type":"professional"|"private"|null,"location":string|null,"title":string|null,"confidence":number,"uncertain_fields":string[],"visible_claims":string[],"warnings":string[]}. confidence est un entier de 0 à 100. Ne déduis pas une finition, puissance, énergie ou type de vendeur si ce n'est pas lisible.`;
-  const parts = [{ text: prompt }];
-  for (const file of files) parts.push({ inline_data: { mime_type: file.mimetype || "image/jpeg", data: file.buffer.toString("base64") } });
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { responseMimeType: "application/json", temperature: 0.1 } }) });
-  if (!r.ok) {
-    const body = (await r.text()).slice(0, 800);
-    const e = new Error(`Gemini HTTP ${r.status}: ${body}`); e.status = r.status; throw e;
-  }
-  const data = await r.json();
-  const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
-  if (!text) throw new Error("Gemini n'a retourné aucun résultat.");
-  return cleanJson(text);
-}
-
-async function analyzeWithGemini(files) {
-  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY manquante. Le moteur Gemini n'est pas configuré.");
-  const models = [GEMINI_MODEL, GEMINI_FALLBACK_MODEL].filter((m, i, a) => m && a.indexOf(m) === i);
-  let last = null;
-  for (const model of models) {
-    const tries = model === GEMINI_MODEL ? 3 : 2;
-    for (let i = 0; i < tries; i++) {
-      try {
-        console.log(`Gemini analyse: modèle=${model}, tentative=${i + 1}/${tries}`);
-        return await callGemini(model, files, i + 1);
-      } catch (e) {
-        last = e;
-        if (![429, 500, 502, 503, 504].includes(e.status)) break;
-        if (i < tries - 1) await sleep(1500 * Math.pow(2, i));
-      }
-    }
-    if (model !== models[models.length - 1]) console.log(`Gemini indisponible sur ${model}, bascule vers ${models[models.indexOf(model) + 1]}`);
-  }
-  throw last || new Error("Gemini indisponible.");
-}
-
+const num = v => { const n = Number(String(v ?? "").replace(/\s/g, "").replace(",", ".")); return Number.isFinite(n) ? n : null; };
+const norm = v => String(v ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const euro = n => n == null ? "Non déterminé" : Math.round(n).toLocaleString("fr-FR") + " €";
-const km = n => n == null ? "Non déterminé" : Math.round(n).toLocaleString("fr-FR") + " km";
+const median = a => { const x=[...a].sort((a,b)=>a-b); if(!x.length)return null; const i=Math.floor(x.length/2); return x.length%2?x[i]:(x[i-1]+x[i])/2; };
+const quantile = (a,p) => { const x=[...a].sort((a,b)=>a-b); if(!x.length)return null; const i=(x.length-1)*p,lo=Math.floor(i),hi=Math.ceil(i); return x[lo]+(x[hi]-x[lo])*(i-lo); };
+const fuelMatch = (a,b) => !b || !a || norm(a).includes(norm(b)) || norm(b).includes(norm(a));
+const gearMatch = (a,b) => !b || !a || norm(a).includes(norm(b)) || (norm(b).includes("manuel") && norm(a).includes("manual")) || (norm(b).includes("auto") && norm(a).includes("auto"));
+const cleanJson = text => { const s=String(text||"").trim().replace(/^```json\s*/i,"").replace(/```$/i,"").trim(); const a=s.indexOf("{"),b=s.lastIndexOf("}"); if(a<0||b<=a)throw new Error("Réponse IA JSON invalide."); return JSON.parse(s.slice(a,b+1)); };
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, vision: Boolean(GEMINI_API_KEY), vision_provider: "gemini", model: GEMINI_MODEL, fallback_model: GEMINI_FALLBACK_MODEL, market: Boolean(process.env.CARHUNT_API_KEY) }));
+async function callGemini(model, files) {
+  const prompt=`Tu es le moteur de lecture de Vaut le Coup ?. Analyse les photos/captures d’une même annonce automobile et recoupe-les. N’invente aucune donnée. Si une information est absente, illisible ou contradictoire, mets null et signale-la. Retourne UNIQUEMENT du JSON avec exactement : {"make":string|null,"model":string|null,"version":string|null,"year":number|null,"mileage_km":number|null,"price_eur":number|null,"energy":string|null,"gearbox":string|null,"power_hp":number|null,"seller_type":"professional"|"private"|null,"location":string|null,"title":string|null,"confidence":number,"uncertain_fields":string[],"visible_claims":string[],"warnings":string[]}. confidence 0-100. Le prix est celui de l’annonce. Ne déduis pas une finition, puissance, énergie ou vendeur si ce n’est pas visible.`;
+  const parts=[{text:prompt},...files.map(f=>({inline_data:{mime_type:f.mimetype||"image/jpeg",data:f.buffer.toString("base64")}}))];
+  const url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+  const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{role:"user",parts}],generationConfig:{responseMimeType:"application/json",temperature:0.1}})});
+  if(!r.ok){const e=new Error(`Gemini HTTP ${r.status}: ${(await r.text()).slice(0,900)}`);e.status=r.status;throw e;}
+  const d=await r.json(); const text=d?.candidates?.[0]?.content?.parts?.map(p=>p.text||"").join("")||""; if(!text)throw new Error("Gemini n’a retourné aucun résultat."); return cleanJson(text);
+}
+async function analyze(files){
+  if(!GEMINI_API_KEY)throw new Error("Le moteur Gemini n’est pas configuré.");
+  const models=[GEMINI_MODEL,GEMINI_FALLBACK_MODEL].filter((m,i,a)=>m&&a.indexOf(m)===i);let last;
+  for(const model of models){const tries=model===GEMINI_MODEL?3:2;for(let i=0;i<tries;i++){try{return await callGemini(model,files);}catch(e){last=e;if(![429,500,502,503,504].includes(e.status))break;if(i<tries-1)await sleep(1200*Math.pow(2,i));}}}
+  throw last||new Error("Gemini indisponible.");
+}
 
-app.post("/api/analyze", upload.array("photos", 3), async (req, res) => {
-  try {
-    const files = req.files || [];
-    if (!files.length) return res.status(400).json({ error: "Aucune image reçue." });
-    const vehicle = await analyzeWithGemini(files);
-    res.json({ ok: true, vehicle });
-  } catch (e) {
-    console.error(e);
-    const msg = e.status === 503 ? "Gemini est momentanément très sollicité. Les tentatives automatiques ont échoué, réessaie dans quelques instants." : e.message || "Erreur pendant l'analyse.";
-    res.status(500).json({ error: msg });
-  }
-});
+function marketError(status,data){const raw=data?.detail??data?.message??data?.error??data;return `Le service marché a refusé la recherche (${status}). ${typeof raw==="string"?raw:JSON.stringify(raw||{})}`;}
+async function carhunt(v){
+  if(!CARHUNT_API_KEY)return {ok:false,code:"CONFIG",user_message:"Comparaison marché indisponible : CarHunt n’est pas configuré."};
+  if(!v.make||!v.model)return {ok:false,code:"INPUT",user_message:"Comparaison marché impossible : marque ou modèle non identifié."};
+  const base={make:String(v.make).trim().toUpperCase(),model:String(v.model).trim().toUpperCase()};
+  // L’API CarHunt documente make/model et page_size. On utilise d’abord la requête la plus sûre,
+  // puis on réessaie sans page_size si le fournisseur rejette le paramètre.
+  const attempts=[new URLSearchParams({...base,page_size:"100"}),new URLSearchParams(base)];let last;
+  for(const params of attempts){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),15000);try{const r=await fetch(`https://api-pro.carhunt.fr/v1/listings/search?${params}`,{headers:{Authorization:`Bearer ${CARHUNT_API_KEY}`,Accept:"application/json"},signal:controller.signal});const raw=await r.text();let d={};try{d=raw?JSON.parse(raw):{};}catch{}if(!r.ok){last={status:r.status,data:d};continue;}return buildMarket(v,Array.isArray(d.listings)?d.listings:[]);}catch(e){if(e.name==="AbortError")return {ok:false,code:"TIMEOUT",user_message:"La comparaison marché a dépassé le délai. L’analyse du véhicule reste disponible."};last={status:0,data:{message:e.message}};}finally{clearTimeout(timer);}}
+  return {ok:false,code:"CARHUNT",status:last?.status,user_message:last?.status?marketError(last.status,last.data):"La comparaison marché est momentanément indisponible."};
+}
+function buildMarket(v,raw){
+  let listings=raw.filter(x=>num(x.price)>0);const y=num(v.year),k=num(v.mileage_km);
+  if(y!=null)listings=listings.filter(x=>{const n=num(x.year);return n==null||Math.abs(n-y)<=2;});
+  if(k!=null)listings=listings.filter(x=>{const n=num(x.mileage);return n==null||Math.abs(n-k)<=30000;});
+  if(v.energy)listings=listings.filter(x=>fuelMatch(x.energy,v.energy));
+  if(v.gearbox)listings=listings.filter(x=>gearMatch(x.gearbox,v.gearbox));
+  const text=`${v.version||""} ${(v.visible_claims||[]).join(" ")} ${(v.warnings||[]).join(" ")}`;const util=/affaire|utilitaire|vasp|societe|société|fourgon|2 places/i.test(text);if(util){const u=listings.filter(x=>/affaire|utilitaire|vasp|societe|société|2 places/i.test(`${x.version||""} ${x.body_type||""}`));if(u.length>=3)listings=u;}
+  const prices=listings.map(x=>num(x.price)).filter(Boolean),med=median(prices),asking=num(v.price_eur);if(med==null)return {ok:true,comparables:0,asking_display:euro(asking),median_display:"Non déterminé",low_display:"Non déterminé",high_display:"Non déterminé",confidence:20,label:"Marché insuffisant",gap_text:"Aucun comparable suffisamment proche n’a été trouvé.",sample:[]};
+  const gap=asking!=null?Math.round((asking/med-1)*100):null;const label=gap==null?"Marché comparable":gap<=-15?"Excellente affaire potentielle":gap<=-8?"Très intéressant":gap<=-3?"Plutôt intéressant":gap<=3?"Dans le marché":gap<=10?"Plutôt cher":"Cher";const confidence=Math.min(95,45+Math.min(10,prices.length)*4+(y!=null?8:0)+(k!=null?8:0)+(v.energy?5:0)+(v.gearbox?5:0));
+  return {ok:true,comparables:prices.length,asking_display:euro(asking),median_display:euro(med),low_display:euro(quantile(prices,.25)),high_display:euro(quantile(prices,.75)),confidence,label,gap_text:gap==null?"Écart au marché non déterminé.":`Le prix demandé est ${Math.abs(gap)} % ${gap>=0?"au-dessus":"en dessous"} du prix médian.`,warning:prices.length<5?"Échantillon limité : résultat à interpréter avec prudence.":null,sample:listings.slice(0,10).map(x=>({price:x.price,year:x.year,mileage:x.mileage,energy:x.energy,gearbox:x.gearbox,horsepower:x.horsepower,version:x.version,seller_type:x.seller_type,city:x.city,source:x.source,source_url:x.source_url}))};
+}
 
-app.post("/api/market", async (req, res) => {
-  try {
-    const key = process.env.CARHUNT_API_KEY;
-    if (!key) return res.status(503).json({ error: "CARHUNT_API_KEY manquante." });
-    const v = req.body || {};
-    if (!v.make || !v.model) return res.status(400).json({ error: "Marque/modèle nécessaires." });
-    const params = new URLSearchParams({ make: String(v.make).toUpperCase(), model: String(v.model).toUpperCase(), page_size: "100" });
-    if (v.year) { params.set("year_min", String(Number(v.year) - 1)); params.set("year_max", String(Number(v.year) + 1)); }
-    if (v.mileage_km) { params.set("mileage_min", String(Math.max(0, Number(v.mileage_km) - 30000))); params.set("mileage_max", String(Number(v.mileage_km) + 30000)); }
-    if (v.energy) params.set("energy", String(v.energy));
-    if (v.gearbox) params.set("gearbox", String(v.gearbox));
-    const r = await fetch(`https://api-pro.carhunt.fr/v1/listings/search?${params}`, { headers: { Authorization: `Bearer ${key}` } });
-    if (!r.ok) throw new Error(`CarHunt HTTP ${r.status}`);
-    const data = await r.json();
-    const listings = (data.listings || []).filter(x => Number.isFinite(Number(x.price)) && Number(x.price) > 0);
-    const prices = listings.map(x => Number(x.price)).sort((a,b)=>a-b);
-    if (!prices.length) return res.json({ ok:true, comparables:0, market_median_eur:null, low_eur:null, high_eur:null, deal_score:null });
-    const median = prices[Math.floor(prices.length / 2)];
-    const q = p => prices[Math.max(0, Math.min(prices.length - 1, Math.floor((prices.length - 1) * p)))];
-    const asking = Number(v.price_eur);
-    const gapPct = asking > 0 ? ((median - asking) / median) * 100 : null;
-    const dealScore = gapPct == null ? null : Math.max(0, Math.min(100, Math.round(50 + gapPct * 2.5)));
-    res.json({ ok:true, comparables:prices.length, market_median_eur:Math.round(median), low_eur:Math.round(q(.15)), high_eur:Math.round(q(.85)), asking_price_eur:Number.isFinite(asking)?asking:null, gap_eur:Number.isFinite(asking)?Math.round(median-asking):null, gap_pct:gapPct==null?null:Math.round(gapPct*10)/10, deal_score:dealScore, sample:listings.slice(0,8).map(x=>({price:x.price,year:x.year,mileage:x.mileage,energy:x.energy,gearbox:x.gearbox,horsepower:x.horsepower,seller_type:x.seller_type,source:x.source,source_url:x.source_url})) });
-  } catch(e) { console.error(e); res.status(500).json({ error:e.message || "Erreur marché." }); }
-});
+app.get("/api/health",(_q,res)=>res.json({ok:true,vision:Boolean(GEMINI_API_KEY),vision_provider:"gemini",model:GEMINI_MODEL,market:Boolean(CARHUNT_API_KEY)}));
+app.post("/api/analyze",upload.array("photos",3),async(req,res)=>{try{if(!req.files?.length)return res.status(400).json({error:"Aucune image reçue."});const vehicle=await analyze(req.files);res.json({ok:true,vehicle});}catch(e){console.error(e);res.status(500).json({error:e.message||"Erreur d’analyse."});}});
+app.post("/api/market",async(req,res)=>{const out=await carhunt(req.body||{});res.status(out.ok?200:503).json(out);});
 
-const HTML = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vaut le Coup ?</title><style>*{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#18212b;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:720px;margin:auto;padding:28px 16px 60px}h1{font-size:42px;line-height:1;margin:0 0 8px}h2{font-size:30px;margin:0 0 22px}.sub{color:#66717d;font-size:21px;margin-bottom:34px}.card{background:#fff;border:1px solid #dfe3e7;border-radius:28px;padding:28px;margin:18px 0;box-shadow:0 2px 10px #00000008}.drop{display:block;border:3px dashed #c7cdd3;border-radius:24px;padding:35px 18px;text-align:center;cursor:pointer;font-size:20px}.drop strong{font-size:24px}.small{display:block;color:#7a838d;margin-top:14px}#file{display:none}.previews{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}.thumb{position:relative;width:112px;height:112px}.thumb img{width:100%;height:100%;object-fit:cover;border-radius:18px;border:1px solid #ddd}.remove{position:absolute;right:-5px;top:-5px;width:34px;height:34px;border:0;border-radius:50%;background:#17212b;color:#fff;font-size:20px}.btn{width:100%;border:0;border-radius:18px;padding:18px;background:#17212b;color:#fff;font-size:20px;font-weight:800;cursor:pointer;margin-top:18px}.btn:disabled{opacity:.5}.status,.result{background:#f7f8fa;border-radius:22px;padding:22px;margin-top:18px}.warn{background:#fff1d6;border-radius:18px;padding:18px;margin:12px 0}.error{background:#ffe1e1;color:#a32626;border-radius:18px;padding:18px;margin-top:18px}.price{font-size:46px;font-weight:900}.muted{color:#68727d}.score{font-size:25px;font-weight:800}.comp{padding:16px 0;border-bottom:1px solid #ddd}.tag{display:inline-block;background:#e9edf1;border-radius:99px;padding:5px 10px;margin:3px 4px 3px 0}</style></head><body><main><h1>Vaut le Coup ? ✓</h1><div class="sub">Avant d’acheter. Demande à l’IA.</div><section class="card"><h2>Analyse une annonce</h2><p>Ajoute jusqu’à 3 photos de l’annonce ou du véhicule.</p><label class="drop" for="file">📸<br><strong>Ajoute une capture ou une photo</strong><span class="small">JPG, PNG, WEBP — 12 Mo max par photo — 3 photos maximum</span></label><input id="file" type="file" accept="image/jpeg,image/png,image/webp" multiple><div id="previews" class="previews"></div><div id="error"></div><button id="go" class="btn" disabled>Analyser l’annonce</button></section><section id="analysis" class="card" hidden></section><section id="market" class="card" hidden></section></main><script>
-const fileInput=document.getElementById('file'),previews=document.getElementById('previews'),go=document.getElementById('go'),errorBox=document.getElementById('error'),analysis=document.getElementById('analysis'),market=document.getElementById('market');let files=[];const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));function renderFiles(){previews.innerHTML='';files.forEach((f,i)=>{const w=document.createElement('div');w.className='thumb';const im=document.createElement('img');im.src=URL.createObjectURL(f);const b=document.createElement('button');b.type='button';b.className='remove';b.textContent='×';b.onclick=()=>{files.splice(i,1);renderFiles()};w.append(im,b);previews.appendChild(w)});go.disabled=!files.length}fileInput.onchange=()=>{files=[...files,...Array.from(fileInput.files||[])].slice(0,3);fileInput.value='';renderFiles()};function showError(m){errorBox.innerHTML='<div class="error">❌ '+esc(m)+'</div>'}function showAnalysis(v){analysis.hidden=false;const rows=[['Marque',v.make],['Modèle',v.model],['Version',v.version],['Année',v.year],['Kilométrage',v.mileage_km!=null?Number(v.mileage_km).toLocaleString('fr-FR')+' km':null],['Prix',v.price_eur!=null?Number(v.price_eur).toLocaleString('fr-FR')+' €':null],['Énergie',v.energy],['Boîte',v.gearbox],['Puissance',v.power_hp!=null?v.power_hp+' ch':null],['Vendeur',v.seller_type==='professional'?'Professionnel':v.seller_type==='private'?'Particulier':null],['Lieu',v.location]];analysis.innerHTML='<h2>Ce que l’IA a lu</h2>'+rows.filter(x=>x[1]!=null&&x[1]!=='').map(x=>'<div><b>'+esc(x[0])+'</b> : '+esc(x[1])+'</div>').join('')+'<p class="score">Confiance de lecture : '+esc(v.confidence??0)+'/100</p>'+(v.uncertain_fields?.length?'<div class="warn">⚠️ À vérifier : '+v.uncertain_fields.map(esc).join(', ')+'</div>':'')+(v.visible_claims?.length?'<p><b>Éléments visibles :</b><br>'+v.visible_claims.map(x=>'<span class="tag">'+esc(x)+'</span>').join('')+'</p>':'')+(v.warnings||[]).map(x=>'<div class="warn">⚠️ '+esc(x)+'</div>').join('')}function showMarket(m){market.hidden=false;if(m.error){market.innerHTML='<h2>Est-ce que ça vaut le coup ?</h2><div class="warn">⚠️ '+esc(m.error)+'</div>';return}market.innerHTML='<h2>Est-ce que ça vaut le coup ?</h2><div class="status"><b>'+esc(m.label||'Marché comparable')+'</b><p>Confiance marché : <b>'+esc(m.confidence??'—')+'/100</b></p><div class="muted">Prix demandé</div><div class="price">'+esc(m.asking_display||((m.asking_price_eur??'—')+' €'))+'</div><p>Marché estimé : <b>'+esc(m.median_display||((m.market_median_eur??'—')+' €'))+'</b><br>Fourchette indicative : '+esc(m.low_display||((m.low_eur??'—')+' €'))+' – '+esc(m.high_display||((m.high_eur??'—')+' €'))+'</p><p>'+esc(m.gap_text||'')+'</p>'+(m.warning?'<div class="warn">⚠️ '+esc(m.warning)+'</div>':'')+'</div><h3>Comparables utilisés</h3>'+((m.comparables||m.sample||[]).map(x=>'<div class="comp"><b>'+esc(x.price_display||x.price||'—')+' €</b> · '+esc(x.year??'?')+' · '+esc(x.mileage_display||x.mileage||'km ?')+'</div>').join('')||'<div class="muted">Aucun détail disponible.</div>')}go.onclick=async()=>{go.disabled=true;errorBox.innerHTML='';analysis.hidden=true;market.hidden=true;try{const fd=new FormData();files.forEach(f=>fd.append('photos',f));const r=await fetch('/api/analyze',{method:'POST',body:fd});const j=await r.json();if(!r.ok)throw new Error(j.error||'Erreur');showAnalysis(j.vehicle);const mr=await fetch('/api/market',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(j.vehicle)});showMarket(await mr.json())}catch(e){showError(e.message)}go.disabled=false};
-</script></main></body></html>`;
-
-app.get("/", (_req,res) => res.type("html").send(HTML));
-const PORT=process.env.PORT||10000;
-app.listen(PORT,'0.0.0.0',()=>console.log(`Vaut le Coup ? sur le port ${PORT} — Gemini ${GEMINI_MODEL} / secours ${GEMINI_FALLBACK_MODEL}`));
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+const HTML=`<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vaut le Coup ?</title><style>*{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#18212b;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:760px;margin:auto;padding:28px 16px 70px}h1{font-size:42px;line-height:1;margin:0 0 8px}h2{font-size:30px;margin:0 0 20px}.sub{color:#66717d;font-size:21px;margin-bottom:30px}.card{background:#fff;border:1px solid #dfe3e7;border-radius:28px;padding:28px;margin:18px 0;box-shadow:0 2px 10px #00000008}.drop{display:block;border:3px dashed #c7cdd3;border-radius:24px;padding:34px 18px;text-align:center;cursor:pointer;font-size:20px}.drop strong{font-size:24px}.small{display:block;color:#7a838d;margin-top:12px}#file{display:none}.previews{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}.thumb{position:relative;aspect-ratio:1}.thumb img{width:100%;height:100%;object-fit:cover;border-radius:18px;border:1px solid #ddd}.remove{position:absolute;right:-5px;top:-5px;width:34px;height:34px;border:0;border-radius:50%;background:#17212b;color:#fff;font-size:20px}.btn{width:100%;border:0;border-radius:18px;padding:18px;background:#17212b;color:#fff;font-size:20px;font-weight:800;cursor:pointer;margin-top:18px}.btn:disabled{opacity:.45}.progress{display:none;margin-top:18px;padding:20px;border-radius:22px;background:#f3f6f9}.progress.on{display:block}.track{height:14px;background:#dfe5ea;border-radius:99px;overflow:hidden}.bar{height:100%;width:0;background:#2563eb;transition:width .35s ease}.step{font-weight:800;font-size:18px;margin-bottom:10px}.note{color:#68727d;margin-top:8px}.status{background:#f7f8fa;border-radius:22px;padding:22px}.warn{background:#fff1d6;border-radius:18px;padding:17px;margin:12px 0}.error{background:#ffe1e1;color:#9d2525;border-radius:18px;padding:17px;margin-top:18px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.box{background:#fff;border-radius:16px;padding:14px}.price{font-size:42px;font-weight:900}.score{font-size:24px;font-weight:800}.tag{display:inline-block;background:#e9edf1;border-radius:99px;padding:6px 10px;margin:3px}.comp{padding:15px 0;border-bottom:1px solid #ddd}.muted{color:#68727d}.link{color:inherit;text-decoration:underline}@media(max-width:520px){main{padding:22px 12px 60px}h1{font-size:36px}.card{padding:22px}.grid{grid-template-columns:1fr}}</style></head><body><main><h1>Vaut le Coup ? ✓</h1><div class="sub">Avant d’acheter. Demande à l’IA.</div><section class="card"><h2>Analyse une annonce</h2><p>Ajoute jusqu’à 3 photos de l’annonce ou du véhicule.</p><label class="drop" for="file">📸<br><strong>Ajoute une capture ou une photo</strong><span class="small">JPG, PNG, WEBP — 12 Mo max par photo — 3 photos maximum</span></label><input id="file" type="file" accept="image/jpeg,image/png,image/webp" multiple><div id="previews" class="previews"></div><div id="error"></div><div id="progress" class="progress"><div id="step" class="step">Préparation…</div><div class="track"><div id="bar" class="bar"></div></div><div id="note" class="note"></div></div><button id="go" class="btn" disabled>Analyser l’annonce</button></section><section id="analysis" class="card" hidden></section><section id="market" class="card" hidden></section></main><script>
+const fileInput=document.getElementById('file'),previews=document.getElementById('previews'),go=document.getElementById('go'),errorBox=document.getElementById('error'),progress=document.getElementById('progress'),bar=document.getElementById('bar'),step=document.getElementById('step'),note=document.getElementById('note'),analysis=document.getElementById('analysis'),market=document.getElementById('market');let files=[],lastVehicle=null;const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+function renderFiles(){previews.innerHTML='';files.forEach((f,i)=>{const w=document.createElement('div');w.className='thumb';const im=document.createElement('img');im.src=URL.createObjectURL(f);const b=document.createElement('button');b.type='button';b.className='remove';b.textContent='×';b.onclick=()=>{files.splice(i,1);renderFiles()};w.append(im,b);previews.append(w)});go.disabled=!files.length}
+fileInput.onchange=()=>{files=[...files,...Array.from(fileInput.files||[])].slice(0,3);fileInput.value='';renderFiles()};
+function setProgress(p,t,n){progress.classList.add('on');bar.style.width=p+'%';step.textContent=t;note.textContent=n}
+function showError(m){errorBox.innerHTML='<div class="error">❌ '+esc(m)+'</div>';go.disabled=false}
+function showAnalysis(v){analysis.hidden=false;const rows=[['Marque',v.make],['Modèle',v.model],['Version',v.version],['Année',v.year],['Kilométrage',v.mileage_km!=null?Number(v.mileage_km).toLocaleString('fr-FR')+' km':null],['Prix',v.price_eur!=null?Number(v.price_eur).toLocaleString('fr-FR')+' €':null],['Énergie',v.energy],['Boîte',v.gearbox],['Puissance',v.power_hp!=null?v.power_hp+' ch':null],['Vendeur',v.seller_type==='professional'?'Professionnel':v.seller_type==='private'?'Particulier':null],['Lieu',v.location]];analysis.innerHTML='<h2>Ce que l’IA a lu</h2>'+rows.filter(x=>x[1]!=null&&x[1]!=='').map(x=>'<div><b>'+esc(x[0])+'</b> : '+esc(x[1])+'</div>').join('')+'<p class="score">Confiance de lecture : '+esc(v.confidence??0)+'/100</p>'+(v.uncertain_fields?.length?'<div class="warn">⚠️ À vérifier : '+v.uncertain_fields.map(esc).join(', ')+'</div>':'')+(v.visible_claims?.length?'<p><b>Éléments visibles :</b><br>'+v.visible_claims.map(x=>'<span class="tag">'+esc(x)+'</span>').join('')+'</p>':'')+(v.warnings||[]).map(x=>'<div class="warn">⚠️ '+esc(x)+'</div>').join('')}
+function marketHtml(m){if(!m.ok)return '<h2>Est-ce que ça vaut le coup ?</h2><div class="warn">⚠️ '+esc(m.user_message||'Comparaison marché indisponible.')+'</div><p class="muted">L’analyse du véhicule est terminée. Tu peux réessayer la comparaison sans renvoyer les photos.</p><button class="btn" id="retry">Réessayer la comparaison</button>';let h='<h2>Est-ce que ça vaut le coup ?</h2><div class="status"><div class="score">'+esc(m.label||'Marché comparable')+'</div><p>Confiance marché : <b>'+esc(m.confidence??'—')+'/100</b></p><div class="grid"><div class="box"><span class="muted">Prix demandé</span><br><b>'+esc(m.asking_display||'—')+'</b></div><div class="box"><span class="muted">Prix médian</span><br><b>'+esc(m.median_display||'—')+'</b></div><div class="box"><span class="muted">25 % bas</span><br><b>'+esc(m.low_display||'—')+'</b></div><div class="box"><span class="muted">75 % haut</span><br><b>'+esc(m.high_display||'—')+'</b></div></div><p>'+esc(m.gap_text||'')+'</p>'+(m.warning?'<div class="warn">⚠️ '+esc(m.warning)+'</div>':'')+'</div><h3>Comparables utilisés ('+esc(m.comparables??0)+')</h3>';h+=m.sample?.length?m.sample.map((c,i)=>'<div class="comp"><b>#'+(i+1)+' — '+esc(c.price!=null?Number(c.price).toLocaleString('fr-FR')+' €':'Prix non indiqué')+'</b><br><span class="muted">'+esc([c.version,c.year,c.mileage!=null?Number(c.mileage).toLocaleString('fr-FR')+' km':null,c.energy,c.gearbox,c.city].filter(Boolean).join(' · '))+'</span>'+(c.source_url?'<br><a class="link" target="_blank" rel="noopener" href="'+esc(c.source_url)+'">Voir l’annonce</a>':'')+'</div>').join(''):'<div class="warn">Aucun comparable détaillé retourné.</div>';return h}
+async function runMarket(v){lastVehicle=v;setProgress(86,'Recherche du marché…','Recherche de véhicules comparables');try{const r=await fetch('/api/market',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(v)});const m=await r.json();market.hidden=false;market.innerHTML=marketHtml(m);if(document.getElementById('retry'))document.getElementById('retry').onclick=()=>runMarket(lastVehicle);setProgress(96,'Calcul du verdict…','Médiane, fourchette et écart au prix demandé');await new Promise(r=>setTimeout(r,250));setProgress(100,'Analyse terminée','Résultat prêt');setTimeout(()=>progress.classList.remove('on'),600)}catch(e){market.hidden=false;market.innerHTML=marketHtml({ok:false,user_message:'La comparaison marché est momentanément indisponible.'});setProgress(100,'Analyse terminée','Analyse IA disponible');setTimeout(()=>progress.classList.remove('on'),900)}}
+go.onclick=async()=>{if(!files.length)return;go.disabled=true;errorBox.innerHTML='';analysis.hidden=true;market.hidden=true;setProgress(10,'Photos reçues','Préparation des images');const fd=new FormData();files.forEach(f=>fd.append('photos',f));try{setProgress(25,'Analyse IA…','Lecture et recoupement des informations');const r=await fetch('/api/analyze',{method:'POST',body:fd});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'Analyse impossible.');setProgress(65,'Données validées','Vérification des informations détectées');lastVehicle=d.vehicle;showAnalysis(d.vehicle);setProgress(78,'Analyse véhicule terminée','La fiche véhicule est disponible');await runMarket(d.vehicle)}catch(e){showError(e.message||'Erreur pendant l’analyse.');progress.classList.remove('on')}};
+</script></body></html>`;
+app.get("/",(_q,res)=>res.type("html").set("Cache-Control","no-store").send(HTML));
+app.listen(PORT,"0.0.0.0",()=>console.log(`Vaut le Coup ? — serveur unique sur ${PORT}`));
