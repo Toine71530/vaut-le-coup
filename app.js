@@ -6,7 +6,7 @@ const PORT = Number(process.env.PORT || 10000);
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const CARHUNT_KEY = process.env.CARHUNT_API_KEY || '';
 const MODELS = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
-const VERSION = '2026-09-12.9';
+const VERSION = '2026-09-12.10';
 const upload = multer({ storage: multer.memoryStorage(), limits: { files: 3, fileSize: 12 * 1024 * 1024 } });
 
 app.disable('x-powered-by');
@@ -65,9 +65,7 @@ function marketMatch(x,v){
   if(year!=null&&itemYear!=null&&Math.abs(year-itemYear)>4)return {ok:false,score:0,reason:'année'};
   if(km!=null&&itemKm!=null&&Math.abs(km-itemKm)>60000)return {ok:false,score:0,reason:'kilométrage'};
   const ve=energyClass(v.energy), xe=energyClass(x.energy);
-  if(ve&&xe&&ve!==xe){
-    if(!(ve==='hybrid'&&xe==='phev'))return {ok:false,score:0,reason:'énergie'};
-  }
+  if(ve&&xe&&ve!==xe){if(!(ve==='hybrid'&&xe==='phev'))return {ok:false,score:0,reason:'énergie'};}
   const vg=gearboxClass(v.gearbox), xg=gearboxClass(x.gearbox);
   if(vg&&xg&&vg!==xg)return {ok:false,score:0,reason:'boîte'};
   if(targetPower!=null&&power!=null&&targetPower>0&&power>0&&Math.abs(power-targetPower)/targetPower>0.25)return {ok:false,score:0,reason:'puissance'};
@@ -82,7 +80,6 @@ function marketMatch(x,v){
   const vb=bodyClass(v), xb=bodyClass(x); if(vb&&xb&&vb===xb)score+=2;
   return {ok:true,score,reason:null};
 }
-function comparable(x,v){return marketMatch(x,v).ok&&number(x.price)>0;}
 async function market(v){
   if(!CARHUNT_KEY)return{ok:false,error:'Comparaison marché indisponible : clé CarHunt absente.'};
   if(!v?.make||!v?.model)return{ok:false,error:'Impossible de comparer : marque ou modèle non identifié.'};
@@ -91,18 +88,19 @@ async function market(v){
   try{response=await fetchWithTimeout('https://api-pro.carhunt.fr/v1/listings/search?'+query,{headers:{Authorization:'Bearer '+CARHUNT_KEY,Accept:'application/json'}},9000);}catch(e){return{ok:false,error:e?.name==='AbortError'?'Comparaison marché trop longue.':'CarHunt momentanément inaccessible.'};}
   const raw=await response.text();let data={};try{data=raw?JSON.parse(raw):{};}catch{}
   if(!response.ok)return{ok:false,error:'CarHunt a refusé la recherche (HTTP '+response.status+').'};
-  const all=(Array.isArray(data.listings)?data.listings:[]).filter(x=>number(x.price)>0).map(x=>{const match=marketMatch(x,v);return {...x,priceNum:number(x.price),matchScore:match.score,matchReason:match.reason};}).filter(x=>matchScoreSafe(x));
   const targetPrice=number(v.price_eur), targetYear=number(v.year), targetKm=number(v.mileage_km), targetCity=norm(v.location);
+  const candidates=(Array.isArray(data.listings)?data.listings:[]).filter(x=>number(x.price)>0).map(x=>{const match=marketMatch(x,v);return {...x,priceNum:number(x.price),matchScore:match.score,matchReason:match.reason};}).filter(x=>x.matchScore>=6);
   const deduped=[];const seen=new Set();
-  for(const x of all.sort((a,b)=>b.matchScore-a.matchScore){
-    const key=[number(x.price),number(x.year),number(x.mileage),norm(x.city)].join('|');
+  for(const x of candidates.sort((a,b)=>b.matchScore-a.matchScore)){
+    const sameTarget=targetPrice!=null&&number(x.price)===targetPrice&&targetYear!=null&&number(x.year)===targetYear&&targetKm!=null&&number(x.mileage)===targetKm&&targetCity&&norm(x.city)===targetCity;
+    if(sameTarget)continue;
+    const key=[number(x.price),number(x.year),number(x.mileage),norm(x.city),norm(x.source_url)].join('|');
     if(seen.has(key))continue;seen.add(key);deduped.push(x);
   }
   const usable=deduped.filter(x=>x.matchScore>=10);
   const fallback=deduped.filter(x=>x.matchScore>=6);
   const primary=usable.length>=5?usable:(fallback.length>=5?fallback:usable);
-  const nonSelf=primary.filter(x=>!(targetPrice!=null&&number(x.price)===targetPrice&&targetYear!=null&&number(x.year)===targetYear&&targetKm!=null&&number(x.mileage)===targetKm&&targetCity&&norm(x.city)===targetCity));
-  const comps=(nonSelf.length>=3?nonSelf:primary).slice(0,30);
+  const comps=primary.slice(0,30);
   const prices=comps.map(x=>x.priceNum), med=median(prices), asking=targetPrice;
   if(med==null)return{ok:true,comparables:0,median:null,score:null,label:'Marché insuffisant',sample:[]};
   const gap=asking==null?null:(med-asking)/med*100;
@@ -111,7 +109,6 @@ async function market(v){
   const label=score==null?'Marché comparable':score>=80?'🔥 Très bonne affaire':score>=65?'👍 Prix très intéressant':score>=55?'🟢 Plutôt intéressant':score>=45?'🟡 Dans le marché':score>=35?'🟠 Plutôt cher':'🔴 Cher';
   return{ok:true,comparables:prices.length,asking,median:Math.round(med),low:Math.round(percentile(prices,.15)),high:Math.round(percentile(prices,.85)),score,label,gap_pct:gap==null?null:Math.round(gap*10)/10,gap_eur:asking==null?null:Math.round(med-asking),warning:prices.length<5?'Échantillon très limité : le verdict marché est indicatif.':prices.length<8?'Échantillon limité : prudence dans le verdict.':null,match_quality:quality,sample:comps.slice(0,8).map(x=>({price:x.priceNum,year:x.year,mileage:x.mileage,energy:x.energy,gearbox:x.gearbox,version:x.version,city:x.city,url:x.source_url}))};
 }
-function matchScoreSafe(x){return x.matchScore>=6;}
 
 app.get('/api/health',(_req,res)=>res.json({ok:true,version:VERSION,provider:'gemini',models:MODELS,gemini:Boolean(GEMINI_KEY),carhunt:Boolean(CARHUNT_KEY)}));
 app.post('/api/analyze',(req,res)=>upload.array('photos',3)(req,res,async err=>{
