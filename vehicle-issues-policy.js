@@ -1,5 +1,6 @@
 import express from 'express';
 import issueLibrary from './vehicle-issues.json' with { type: 'json' };
+import './recall-policy.js';
 
 const previousJson = express.response.json;
 
