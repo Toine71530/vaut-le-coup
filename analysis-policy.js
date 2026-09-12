@@ -1,5 +1,6 @@
 import express from 'express';
 import './market-policy.js';
+import './puretech-policy.js';
 
 // Complément non destructif : conserve toute la chaîne existante et complète
 // les champs structurés que Gemini peut laisser absents lorsque l'information
