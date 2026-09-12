@@ -6,7 +6,7 @@ const PORT = Number(process.env.PORT || 10000);
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const CARHUNT_KEY = process.env.CARHUNT_API_KEY || '';
 const MODELS = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
-const VERSION = '2026-09-12.7';
+const VERSION = '2026-09-12.8';
 const upload = multer({ storage: multer.memoryStorage(), limits: { files: 3, fileSize: 12 * 1024 * 1024 } });
 
 app.disable('x-powered-by');
@@ -21,7 +21,13 @@ const median = values => { const a = values.filter(Number.isFinite).sort((x,y)=>
 const percentile = (values,p) => { const a=values.filter(Number.isFinite).sort((x,y)=>x-y); return a.length ? a[Math.round((a.length-1)*p)] : null; };
 async function fetchWithTimeout(url, options, ms) { const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),ms); try { return await fetch(url,{...options,signal:controller.signal}); } finally { clearTimeout(timer); } }
 
-const PROMPT = `Analyse ces photos/captures d'une MEME annonce automobile. Recoupe toutes les images. Lis uniquement ce qui est réellement visible, n'invente rien. Information absente ou illisible = null. Signale toute contradiction. Extrais marque, modèle, version/finition, année, kilométrage, prix, énergie, boîte, puissance, vendeur, lieu, nombre de places. Relève aussi entretien, distribution/courroie, contrôle technique, historique, accident, garantie et travaux. Retourne UNIQUEMENT un objet JSON valide avec exactement : make, model, version, year, mileage_km, price_eur, energy, gearbox, power_hp, seller_type, location, title, confidence, uncertain_fields, visible_claims, warnings. confidence = 0 à 100. seller_type = professional, private ou null. uncertain_fields, visible_claims et warnings sont des tableaux de chaînes.`;
+const PROMPT = `Analyse ces photos/captures d'une MEME annonce automobile. Recoupe toutes les images. Lis uniquement ce qui est réellement visible, n'invente rien. Information absente ou illisible = null.
+
+REGLE DE COHERENCE IMPORTANTE : avant de signaler une contradiction, compare le sens des informations et pas seulement les mots. "Hybride" est une designation generique compatible avec "Hybride rechargeable", "PHEV" et "Plug-in Hybrid". Ne signale JAMAIS une contradiction uniquement parce qu'un titre dit "Hybride" alors qu'une fiche ou version precise "Hybride rechargeable". De meme, des formulations generiques et plus precises sont compatibles lorsqu'elles decrivent la meme caracteristique. Ne signale une contradiction que si deux informations visibles sont reellement incompatibles, par exemple Diesel contre Hybride, 150 ch contre 223 ch, 2021 contre 2023 ou manuelle contre automatique. En cas de doute, mets l'information dans uncertain_fields plutot que dans warnings.
+
+Extrais marque, modele, version/finition, annee, kilometrage, prix, energie, boite, puissance, vendeur, lieu et nombre de places. Pour le nombre de places, cherche explicitement les mentions "places", "sieges", "seats" ou une fiche technique equivalente. Si un nombre de places est clairement visible, renseigne seats avec ce nombre. Information absente ou illisible = null. Relève aussi entretien, distribution/courroie, controle technique, historique, accident, garantie et travaux. Les affirmations du vendeur doivent rester des affirmations visibles et ne doivent pas etre transformees en faits verifies.
+
+Retourne UNIQUEMENT un objet JSON valide avec exactement : make, model, version, year, mileage_km, price_eur, energy, gearbox, power_hp, seller_type, location, seats, title, confidence, uncertain_fields, visible_claims, warnings. confidence = 0 a 100. seller_type = professional, private ou null. seats = nombre entier ou null. uncertain_fields, visible_claims et warnings sont des tableaux de chaines.`;
 
 async function askGemini(model, files) {
   const body = { contents:[{ role:'user', parts:[{text:PROMPT}, ...files.map(f=>({inline_data:{mime_type:f.mimetype,data:f.buffer.toString('base64')}}))] }], generationConfig:{temperature:0,responseMimeType:'application/json',maxOutputTokens:1800} };
