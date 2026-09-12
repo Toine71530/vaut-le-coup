@@ -1,16 +1,14 @@
 {
   "name": "vaut-le-coup-v0-4",
-  "version": "0.4.2",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node production.js",
+    "start": "node server.js",
     "dev": "node --watch server.js"
   },
   "dependencies": {
-    "cors": "^2.8.5",
     "express": "^4.21.2",
-    "multer": "^2.0.2",
-    "openai": "^5.19.1"
+    "multer": "^2.0.2"
   }
 }
