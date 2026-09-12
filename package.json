@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node market-policy.js",
-    "dev": "node --watch market-policy.js"
+    "start": "node analysis-policy.js",
+    "dev": "node --watch analysis-policy.js"
   },
   "dependencies": {
     "express": "^5.1.0",
