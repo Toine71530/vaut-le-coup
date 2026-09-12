@@ -5,92 +5,77 @@ const app = express();
 const PORT = Number(process.env.PORT || 10000);
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
 const PREFERRED_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
-const GEMINI_MODELS = [...new Set([PREFERRED_MODEL, "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash-lite"])];
+const GEMINI_MODELS = [...new Set([PREFERRED_MODEL,"gemini-2.5-flash-lite","gemini-2.5-flash","gemini-3.5-flash-lite"])];
 const CARHUNT_KEY = process.env.CARHUNT_API_KEY || "";
-const upload = multer({ storage: multer.memoryStorage(), limits: { files: 3, fileSize: 12 * 1024 * 1024 } });
+const upload = multer({storage:multer.memoryStorage(),limits:{files:3,fileSize:12*1024*1024}});
+app.use(express.json({limit:"1mb"}));
 
-app.use(express.json({ limit: "1mb" }));
+const num=v=>{const x=Number(String(v??"").replace(/\s/g,"").replace(",","."));return Number.isFinite(x)?x:null};
+const norm=v=>String(v??"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g," ").trim();
+const same=(a,b)=>!a||!b||norm(a)===norm(b)||norm(a).includes(norm(b))||norm(b).includes(norm(a));
+const esc=s=>String(s??"").replace(/[&<>\"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
+const median=a=>{const x=[...a].sort((a,b)=>a-b);if(!x.length)return null;const i=Math.floor(x.length/2);return x.length%2?x[i]:(x[i-1]+x[i])/2};
+const quantile=(a,p)=>{const x=[...a].sort((a,b)=>a-b);if(!x.length)return null;const i=(x.length-1)*p,l=Math.floor(i),h=Math.ceil(i);return x[l]+(x[h]-x[l])*(i-l)};
+const euro=v=>v==null?"Non déterminé":Math.round(v).toLocaleString("fr-FR")+" €";
 
-const num = v => { const x = Number(String(v ?? "").replace(/\s/g, "").replace(",", ".")); return Number.isFinite(x) ? x : null; };
-const norm = v => String(v ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
-const same = (a,b) => !a || !b || norm(a) === norm(b) || norm(a).includes(norm(b)) || norm(b).includes(norm(a));
-const esc = s => String(s ?? "").replace(/[&<>\"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
-const euro = v => v == null ? "Non déterminé" : Math.round(v).toLocaleString("fr-FR") + " €";
-const median = a => { const x=[...a].sort((a,b)=>a-b); if(!x.length)return null; const i=Math.floor(x.length/2); return x.length%2?x[i]:(x[i-1]+x[i])/2; };
-const quantile = (a,p) => { const x=[...a].sort((a,b)=>a-b); if(!x.length)return null; const i=(x.length-1)*p,l=Math.floor(i),h=Math.ceil(i); return x[l]+(x[h]-x[l])*(i-l); };
-const sleep = ms => new Promise(r=>setTimeout(r,ms));
-
-function jsonFrom(text){ const s=String(text||"").replace(/^```json\s*/i,"").replace(/```\s*$/i,"").trim(); const a=s.indexOf("{"),b=s.lastIndexOf("}"); if(a<0||b<=a)throw new Error("Réponse IA invalide."); return JSON.parse(s.slice(a,b+1)); }
+function parseJson(text){const s=String(text||"").replace(/^```json\s*/i,"").replace(/```\s*$/i,"").trim(),a=s.indexOf("{"),b=s.lastIndexOf("}");if(a<0||b<=a)throw new Error("Réponse IA invalide.");return JSON.parse(s.slice(a,b+1))}
 
 async function callGemini(files){
-  if(!GEMINI_KEY) throw new Error("Le moteur Gemini n'est pas configuré dans Render.");
-  const schema={type:"OBJECT",properties:{make:{type:"STRING",nullable:true},model:{type:"STRING",nullable:true},version:{type:"STRING",nullable:true},year:{type:"INTEGER",nullable:true},mileage_km:{type:"INTEGER",nullable:true},price_eur:{type:"NUMBER",nullable:true},energy:{type:"STRING",nullable:true},gearbox:{type:"STRING",nullable:true},power_hp:{type:"INTEGER",nullable:true},seller_type:{type:"STRING",nullable:true},location:{type:"STRING",nullable:true},title:{type:"STRING",nullable:true},confidence:{type:"INTEGER"},uncertain_fields:{type:"ARRAY",items:{type:"STRING"}},visible_claims:{type:"ARRAY",items:{type:"STRING"}},warnings:{type:"ARRAY",items:{type:"STRING"}}}};
-  const prompt=`Tu es le moteur d'analyse de "Vaut le Coup ?". Ces images sont des captures/photos de la MEME annonce automobile. Recoupe toutes les images. Lis les textes visibles avec précision. N'invente jamais. Si une donnée est absente/illisible, null. Si deux images se contredisent, choisis la donnée la plus explicite et ajoute une alerte dans warnings. Ne déduis jamais le vendeur, la finition ou une caractéristique non visible. Vérifie spécialement marque, modèle, version, année, kilométrage, prix, énergie, boîte, puissance, vendeur et lieu. Les mentions de distribution, entretien, contrôle technique, nombre de places, accident, garantie, historique ou travaux doivent être conservées dans visible_claims/warnings si elles sont visibles. Retourne UNIQUEMENT le JSON demandé.`;
-  const parts=[{text:prompt},...files.map(f=>({inline_data:{mime_type:f.mimetype,data:f.buffer.toString("base64")}}))];
-  let last=null;
-  for(const model of GEMINI_MODELS){
-    try{
-      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
-      const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{role:"user",parts}],generationConfig:{temperature:0,responseMimeType:"application/json",responseSchema:schema,maxOutputTokens:1800}}),signal:controller.signal});
-      clearTimeout(timer); const raw=await r.text();
-      if(!r.ok){last=new Error(`Gemini ${model} HTTP ${r.status}`);last.status=r.status;continue;}
-      const data=JSON.parse(raw),text=(data?.candidates?.[0]?.content?.parts||[]).map(x=>x.text||"").join("");
-      if(!text)throw new Error("Gemini n'a retourné aucun résultat.");
-      const v=jsonFrom(text); v.confidence=Math.max(0,Math.min(100,num(v.confidence)??0)); v.uncertain_fields=Array.isArray(v.uncertain_fields)?v.uncertain_fields:[]; v.visible_claims=Array.isArray(v.visible_claims)?v.visible_claims:[]; v.warnings=Array.isArray(v.warnings)?v.warnings:[]; return {vehicle:v,model};
-    }catch(e){last=e;}
-  }
-  throw last || new Error("Gemini indisponible.");
+ if(!GEMINI_KEY)throw new Error("Le moteur Gemini n'est pas configuré dans Render.");
+ const schema={type:"OBJECT",properties:{make:{type:"STRING",nullable:true},model:{type:"STRING",nullable:true},version:{type:"STRING",nullable:true},year:{type:"INTEGER",nullable:true},mileage_km:{type:"INTEGER",nullable:true},price_eur:{type:"NUMBER",nullable:true},energy:{type:"STRING",nullable:true},gearbox:{type:"STRING",nullable:true},power_hp:{type:"INTEGER",nullable:true},seller_type:{type:"STRING",nullable:true},location:{type:"STRING",nullable:true},title:{type:"STRING",nullable:true},confidence:{type:"INTEGER"},uncertain_fields:{type:"ARRAY",items:{type:"STRING"}},visible_claims:{type:"ARRAY",items:{type:"STRING"}},warnings:{type:"ARRAY",items:{type:"STRING"}}}};
+ const prompt="Tu es le moteur d'analyse de Vaut le Coup ?. Ces images appartiennent à la MEME annonce automobile. Recoupe toutes les images et lis les textes visibles. N'invente jamais. Donnée absente ou illisible = null. En cas de contradiction, garde la donnée la plus explicite et ajoute une alerte. Ne déduis jamais vendeur, finition, puissance ou énergie. Conserve dans visible_claims/warnings les mentions visibles concernant entretien, distribution, contrôle technique, nombre de places, accident, garantie, historique et travaux. Retourne uniquement le JSON demandé.";
+ const parts=[{text:prompt},...files.map(f=>({inline_data:{mime_type:f.mimetype,data:f.buffer.toString("base64")}}))];
+ let last=null;
+ for(const model of GEMINI_MODELS){
+  try{
+   const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),15000);
+   const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+encodeURIComponent(model)+":generateContent?key="+encodeURIComponent(GEMINI_KEY),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{role:"user",parts}],generationConfig:{temperature:0,responseMimeType:"application/json",responseSchema:schema,maxOutputTokens:1800}}),signal:controller.signal});
+   clearTimeout(timer);const raw=await r.text();
+   if(!r.ok){last=new Error("Gemini "+model+" HTTP "+r.status);continue}
+   const d=JSON.parse(raw),text=(d?.candidates?.[0]?.content?.parts||[]).map(x=>x.text||"").join("");if(!text)throw new Error("Gemini n'a retourné aucun résultat.");
+   const v=parseJson(text);v.confidence=Math.max(0,Math.min(100,num(v.confidence)??0));v.uncertain_fields=Array.isArray(v.uncertain_fields)?v.uncertain_fields:[];v.visible_claims=Array.isArray(v.visible_claims)?v.visible_claims:[];v.warnings=Array.isArray(v.warnings)?v.warnings:[];return {vehicle:v,model};
+  }catch(e){last=e}
+ }
+ throw last||new Error("Gemini indisponible.");
 }
 
-function compatible(x,v,wide=false){
-  if(!same(x.make,v.make)||!same(x.model,v.model))return false;
-  const y=num(v.year),iy=num(x.year),km=num(v.mileage_km),ik=num(x.mileage);
-  if(y!=null&&iy!=null&&Math.abs(y-iy)>(wide?4:3))return false;
-  if(km!=null&&ik!=null&&Math.abs(km-ik)>(wide?50000:30000))return false;
-  if(v.energy&&x.energy&&!same(v.energy,x.energy))return false;
-  if(v.gearbox&&x.gearbox&&!same(v.gearbox,x.gearbox))return false;
-  return num(x.price)>0;
-}
+function compatible(x,v,wide=false){if(!same(x.make,v.make)||!same(x.model,v.model))return false;const y=num(v.year),iy=num(x.year),km=num(v.mileage_km),ik=num(x.mileage);if(y!=null&&iy!=null&&Math.abs(y-iy)>(wide?4:3))return false;if(km!=null&&ik!=null&&Math.abs(km-ik)>(wide?50000:30000))return false;if(v.energy&&x.energy&&!same(v.energy,x.energy))return false;if(v.gearbox&&x.gearbox&&!same(v.gearbox,x.gearbox))return false;return num(x.price)>0}
 
 async function market(v){
-  if(!CARHUNT_KEY)return {ok:false,error:"Comparaison marché indisponible : CarHunt n'est pas configuré."};
-  if(!v?.make||!v?.model)return {ok:false,error:"Impossible de comparer : marque ou modèle non identifié."};
-  const params=new URLSearchParams({make:String(v.make).trim().toUpperCase(),model:String(v.model).trim().toUpperCase(),page_size:"100"});
-  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);
-  try{
-    const r=await fetch(`https://api-pro.carhunt.fr/v1/listings/search?${params}`,{headers:{Authorization:`Bearer ${CARHUNT_KEY}`,Accept:"application/json"},signal:controller.signal});
-    const raw=await r.text(); let data={}; try{data=raw?JSON.parse(raw):{}}catch{}
-    if(!r.ok){console.error("CarHunt",r.status,raw.slice(0,500));return {ok:false,error:`Comparaison marché indisponible (CarHunt ${r.status}).`};}
-    const all=Array.isArray(data.listings)?data.listings:[];
-    let comps=all.filter(x=>compatible(x,v,false));
-    if(comps.length<5)comps=all.filter(x=>compatible(x,v,true));
-    const priced=comps.map(x=>({...x,p:num(x.price)})).filter(x=>x.p>0).sort((a,b)=>Math.abs((num(a.year)||num(v.year)||0)-(num(v.year)||0))-Math.abs((num(b.year)||num(v.year)||0)-(num(v.year)||0)));
-    const prices=priced.map(x=>x.p); if(!prices.length)return {ok:true,comparables:0,asking:euro(num(v.price_eur)),median:null,low:null,high:null,score:null,label:"Marché insuffisant",gap_pct:null,gap_eur:null,sample:[]};
-    const med=median(prices),ask=num(v.price_eur),gapPct=ask>0?((med-ask)/med)*100:null;
-    const score=gapPct==null?null:Math.max(0,Math.min(100,Math.round(50+gapPct*2.5)));
-    const label=score==null?"Marché comparable":score>=80?"🔥 Très bonne affaire":score>=65?"👍 Prix très intéressant":score>=55?"🟢 Plutôt intéressant":score>=45?"🟡 Dans le marché":score>=35?"🟠 Plutôt cher":"🔴 Cher";
-    return {ok:true,comparables:prices.length,asking:euro(ask),median:Math.round(med),low:Math.round(quantile(prices,.15)),high:Math.round(quantile(prices,.85)),score,label,gap_pct:gapPct==null?null:Math.round(gapPct*10)/10,gap_eur:ask>0?Math.round(med-ask):null,warning:prices.length<8?"Échantillon limité : interprétation prudente.":null,sample:priced.slice(0,8).map(x=>({price:x.p,year:x.year,mileage:x.mileage,energy:x.energy,gearbox:x.gearbox,version:x.version,seller_type:x.seller_type,city:x.city,source:x.source,url:x.source_url}))};
-  }catch(e){console.error("CarHunt",e);return {ok:false,error:e.name==="AbortError"?"La comparaison marché a dépassé 10 secondes.":"La comparaison marché est temporairement indisponible."};}finally{clearTimeout(timer);}
+ if(!CARHUNT_KEY)return {ok:false,error:"Comparaison marché indisponible : CarHunt n'est pas configuré."};
+ if(!v?.make||!v?.model)return {ok:false,error:"Impossible de comparer : marque ou modèle non identifié."};
+ const qs=new URLSearchParams({make:String(v.make).trim().toUpperCase(),model:String(v.model).trim().toUpperCase(),page_size:"100"});
+ const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);
+ try{
+  const r=await fetch("https://api-pro.carhunt.fr/v1/listings/search?"+qs.toString(),{headers:{Authorization:"Bearer "+CARHUNT_KEY,Accept:"application/json"},signal:controller.signal});
+  const raw=await r.text();let data={};try{data=raw?JSON.parse(raw):{}}catch{}
+  if(!r.ok){console.error("CarHunt",r.status,raw.slice(0,500));return {ok:false,error:"Comparaison marché indisponible (CarHunt "+r.status+")."}}
+  const all=Array.isArray(data.listings)?data.listings:[];let comps=all.filter(x=>compatible(x,v,false));if(comps.length<5)comps=all.filter(x=>compatible(x,v,true));
+  const priced=comps.map(x=>({...x,p:num(x.price)})).filter(x=>x.p>0).sort((a,b)=>Math.abs((num(a.year)||num(v.year)||0)-(num(v.year)||0))-Math.abs((num(b.year)||num(v.year)||0)-(num(v.year)||0)));
+  const prices=priced.map(x=>x.p);if(!prices.length)return {ok:true,comparables:0,asking:euro(num(v.price_eur)),median:null,low:null,high:null,score:null,label:"Marché insuffisant",gap_pct:null,gap_eur:null,sample:[]};
+  const med=median(prices),ask=num(v.price_eur),gapPct=ask>0?((med-ask)/med)*100:null,score=gapPct==null?null:Math.max(0,Math.min(100,Math.round(50+gapPct*2.5)));
+  const label=score==null?"Marché comparable":score>=80?"🔥 Très bonne affaire":score>=65?"👍 Prix très intéressant":score>=55?"🟢 Plutôt intéressant":score>=45?"🟡 Dans le marché":score>=35?"🟠 Plutôt cher":"🔴 Cher";
+  return {ok:true,comparables:prices.length,asking:euro(ask),median:Math.round(med),low:Math.round(quantile(prices,.15)),high:Math.round(quantile(prices,.85)),score,label,gap_pct:gapPct==null?null:Math.round(gapPct*10)/10,gap_eur:ask>0?Math.round(med-ask):null,warning:prices.length<8?"Échantillon limité : interprétation prudente.":null,sample:priced.slice(0,8).map(x=>({price:x.p,year:x.year,mileage:x.mileage,energy:x.energy,gearbox:x.gearbox,version:x.version,seller_type:x.seller_type,city:x.city,source:x.source,url:x.source_url}))};
+ }catch(e){console.error("CarHunt",e);return {ok:false,error:e.name==="AbortError"?"La comparaison marché a dépassé 10 secondes.":"La comparaison marché est temporairement indisponible."}}finally{clearTimeout(timer)}
 }
 
 app.get("/api/health",(_req,res)=>res.json({ok:true,provider:"gemini",model:PREFERRED_MODEL,gemini:Boolean(GEMINI_KEY),carhunt:Boolean(CARHUNT_KEY)}));
-app.post("/api/analyze",upload.array("photos",3),async(req,res)=>{try{const files=req.files||[];if(!files.length)return res.status(400).json({error:"Aucune photo reçue."});const out=await callGemini(files);res.json({ok:true,vehicle:out.vehicle,model:out.model,photos:files.length});}catch(e){console.error("Analyze",e);res.status(503).json({error:"Analyse IA indisponible. Réessaie dans quelques secondes."});}});
-app.post("/api/market",async(req,res)=>{const out=await market(req.body||{});res.status(out.ok?200:503).json(out);});
+app.post("/api/analyze",upload.array("photos",3),async(req,res)=>{try{const files=req.files||[];if(!files.length)return res.status(400).json({error:"Aucune photo reçue."});const out=await callGemini(files);res.json({ok:true,vehicle:out.vehicle,model:out.model,photos:files.length})}catch(e){console.error("Analyze",e);res.status(503).json({error:"Analyse IA indisponible. Réessaie dans quelques secondes."})}});
+app.post("/api/market",async(req,res)=>{const out=await market(req.body||{});res.status(out.ok?200:503).json(out)});
 
 const HTML=`<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vaut le Coup ?</title><style>
 *{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#17212b;font-family:system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:760px;margin:auto;padding:18px 12px 60px}.card{background:#fff;border:1px solid #e0e4e8;border-radius:24px;padding:20px;margin:14px 0}h1{font-size:38px;margin:0}h2{font-size:29px;margin:0 0 12px}.muted{color:#68737d}.drop{display:block;border:3px dashed #c8ced4;border-radius:20px;padding:28px 12px;text-align:center;cursor:pointer}.drop strong{font-size:22px}.small{display:block;color:#7b858e;margin-top:8px}#file{display:none}.previews{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:12px}.thumb{position:relative;aspect-ratio:1}.thumb img{width:100%;height:100%;object-fit:cover;border-radius:14px}.x{position:absolute;right:-5px;top:-5px;border:0;border-radius:50%;width:34px;height:34px;background:#17212b;color:#fff;font-size:22px}.btn{width:100%;border:0;border-radius:16px;padding:17px;background:#17212b;color:#fff;font-size:19px;font-weight:850;margin-top:15px}.btn:disabled{opacity:.45}.status{display:none;margin-top:14px;padding:15px;border-radius:17px;background:#eef2f5}.status.on{display:block}.track{height:10px;background:#dce2e7;border-radius:99px;overflow:hidden;margin-top:9px}.bar{height:100%;width:0;background:#2563eb;transition:width .3s}.grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.field{background:#f6f7f8;border-radius:13px;padding:11px}.field b{font-size:12px;color:#707b84}.pill{display:inline-block;background:#e9edf1;border-radius:99px;padding:6px 9px;margin:3px}.warn{background:#fff0d2;border-radius:15px;padding:13px;margin:9px 0}.good{background:#e5f6eb;border-radius:17px;padding:16px}.bad{background:#ffe7e4;border-radius:17px;padding:16px}.score{font-size:52px;font-weight:950}.comp{padding:11px 0;border-bottom:1px solid #e1e5e8}.price{font-weight:900}@media(max-width:520px){h1{font-size:34px}.grid{grid-template-columns:1fr}.card{padding:18px}}
 </style></head><body><main class="wrap"><h1>Vaut le Coup ? ✓</h1><p class="muted">Avant d’acheter. Demande à l’IA.</p><section class="card"><h2>Analyse une annonce</h2><p>Ajoute jusqu’à 3 captures/photos de la même annonce.</p><label class="drop" for="file">📸<br><strong>Ajouter une capture ou une photo</strong><span class="small">JPG, PNG, WEBP — 12 Mo max — 3 photos</span></label><input id="file" type="file" accept="image/jpeg,image/png,image/webp" multiple><div id="previews" class="previews"></div><div id="status" class="status"><b id="st"></b><div class="track"><div id="bar" class="bar"></div></div><div id="note" class="muted"></div></div><button id="go" class="btn" disabled>Analyser l’annonce</button></section><section id="analysis" class="card" hidden></section><section id="market" class="card" hidden></section></main><script>
 const $=id=>document.getElementById(id),input=$("file"),pre=$("previews"),go=$("go"),status=$("status"),st=$("st"),bar=$("bar"),note=$("note"),analysis=$("analysis"),marketBox=$("market");let files=[],vehicle=null,busy=false;
-const esc=s=>String(s??"").replace(/[&<>\"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
-function render(){pre.innerHTML=files.map((f,i)=>`<div class="thumb"><img src="${URL.createObjectURL(f)}"><button class="x" data-i="${i}" type="button">×</button></div>`).join("");go.disabled=!files.length||busy}
-input.onchange=()=>{files=files.concat([...input.files]).slice(0,3);input.value="";render()};pre.onclick=e=>{const b=e.target.closest('.x');if(b){files.splice(+b.dataset.i,1);render()}};
-function progress(p,title,msg){status.classList.add('on');bar.style.width=p+'%';st.textContent=title;note.textContent=msg||''}
-function field(k,v){return `<div class="field"><b>${k}</b><br>${esc(v??'Non déterminé')}</div>`}
-function showAnalysis(v){analysis.hidden=false;analysis.innerHTML=`<h2>Ce que l’IA a lu</h2><div class="grid">${field('Marque',v.make)}${field('Modèle',v.model)}${field('Version',v.version)}${field('Année',v.year)}${field('Kilométrage',v.mileage_km!=null?Number(v.mileage_km).toLocaleString('fr-FR')+' km':null)}${field('Prix',v.price_eur!=null?Number(v.price_eur).toLocaleString('fr-FR')+' €':null)}${field('Énergie',v.energy)}${field('Boîte',v.gearbox)}${field('Puissance',v.power_hp!=null?v.power_hp+' ch':null)}${field('Vendeur',v.seller_type==='professional'?'Professionnel':v.seller_type==='private'?'Particulier':null)}${field('Lieu',v.location)}</div><p><b>Confiance de lecture :</b> ${esc(v.confidence)}/100</p>${(v.uncertain_fields||[]).map(x=>`<div class="warn">⚠️ À vérifier : ${esc(x)}</div>`).join('')}${(v.warnings||[]).map(x=>`<div class="warn">⚠️ ${esc(x)}</div>`).join('')}${(v.visible_claims||[]).length?'<h3>Éléments visibles</h3>'+(v.visible_claims||[]).map(x=>`<span class="pill">${esc(x)}</span>`).join(''):''}`}
-function showMarket(m){marketBox.hidden=false;if(!m.ok){marketBox.innerHTML=`<h2>Est-ce que ça vaut le coup ?</h2><div class="warn">⚠️ ${esc(m.error||'Comparaison indisponible.')}</div><button id="retry" class="btn">Réessayer la comparaison</button>`;$("retry").onclick=runMarket;return}if(!m.median){marketBox.innerHTML='<h2>Est-ce que ça vaut le coup ?</h2><div class="warn">Marché insuffisant : pas assez de véhicules comparables pour donner un verdict fiable.</div>';return}const s=m.score;const tone=s>=55?'good':'bad';marketBox.innerHTML=`<h2>Est-ce que ça vaut le coup ?</h2><div class="${tone}"><div class="score">${s}/100</div><h3>${esc(m.label)}</h3><b>Prix demandé : ${esc(m.asking)}</b><br>Médiane du marché : <b>${Number(m.median).toLocaleString('fr-FR')} €</b><br>Fourchette : ${Number(m.low).toLocaleString('fr-FR')}–${Number(m.high).toLocaleString('fr-FR')} €<br><span class="muted">${m.gap_pct>=0?'Sous':'Au-dessus'} du marché de ${Math.abs(m.gap_pct).toFixed(1)} % (${Math.abs(m.gap_eur).toLocaleString('fr-FR')} €).</span></div>${m.warning?`<div class="warn">⚠️ ${esc(m.warning)}</div>`:''}<h3>Comparables utilisés (${m.comparables})</h3>${(m.sample||[]).map(x=>`<div class="comp"><span class="price">${Number(x.price).toLocaleString('fr-FR')} €</span> · ${x.year??'?'} · ${x.mileage?Number(x.mileage).toLocaleString('fr-FR')+' km':'km ?'}<br><span class="muted">${esc(x.source||'Source inconnue')}${x.city?' · '+esc(x.city):''}</span></div>`).join('')}`}
-async function runMarket(){if(!vehicle)return;marketBox.hidden=false;marketBox.innerHTML='<h2>Est-ce que ça vaut le coup ?</h2><div class="status on">🔎 Comparaison de véhicules similaires…</div>';try{const r=await fetch('/api/market',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(vehicle)});const m=await r.json();showMarket(m)}catch(e){showMarket({ok:false,error:'Impossible de joindre le comparateur marché.'})}}
-go.onclick=async()=>{if(busy)return;busy=true;go.disabled=true;analysis.hidden=true;marketBox.hidden=true;progress(10,'Préparation…',`${files.length} photo(s) sélectionnée(s)`);try{const fd=new FormData();files.forEach(f=>fd.append('photos',f));progress(25,'Lecture IA…','Analyse des captures par Gemini');const r=await fetch('/api/analyze',{method:'POST',body:fd});const j=await r.json();if(!r.ok)throw new Error(j.error||'Analyse indisponible');vehicle=j.vehicle;showAnalysis(vehicle);progress(65,'Comparaison marché…','Recherche CarHunt des véhicules comparables');await runMarket();progress(100,'Analyse terminée','Résultat prêt');setTimeout(()=>status.classList.remove('on'),700)}catch(e){progress(100,'Échec',e.message);status.querySelector('.track').style.display='none'}finally{busy=false;go.disabled=!files.length}};
+function render(){pre.innerHTML="";files.forEach(function(f,i){const d=document.createElement("div"),img=document.createElement("img"),b=document.createElement("button");d.className="thumb";img.src=URL.createObjectURL(f);b.className="x";b.type="button";b.dataset.i=i;b.textContent="×";d.append(img,b);pre.append(d)});go.disabled=!files.length||busy}
+input.onchange=function(){files=files.concat(Array.from(input.files||[])).slice(0,3);input.value="";render()};pre.onclick=function(e){const b=e.target.closest("button.x");if(b){files.splice(Number(b.dataset.i),1);render()}};
+function progress(p,title,msg){status.classList.add("on");bar.style.width=p+"%";st.textContent=title;note.textContent=msg||""}
+function field(k,v){return "<div class=\"field\"><b>"+k+"</b><br>"+esc(v==null?"Non déterminé":v)+"</div>"}
+function showAnalysis(v){analysis.hidden=false;let h="<h2>Ce que l’IA a lu</h2><div class=\"grid\">";h+=field("Marque",v.make)+field("Modèle",v.model)+field("Version",v.version)+field("Année",v.year)+field("Kilométrage",v.mileage_km!=null?Number(v.mileage_km).toLocaleString("fr-FR")+" km":null)+field("Prix",v.price_eur!=null?Number(v.price_eur).toLocaleString("fr-FR")+" €":null)+field("Énergie",v.energy)+field("Boîte",v.gearbox)+field("Puissance",v.power_hp!=null?v.power_hp+" ch":null)+field("Vendeur",v.seller_type==="professional"?"Professionnel":v.seller_type==="private"?"Particulier":null)+field("Lieu",v.location)+"</div><p><b>Confiance de lecture :</b> "+esc(v.confidence)+"/100</p>";(v.uncertain_fields||[]).forEach(function(x){h+="<div class=\"warn\">⚠️ À vérifier : "+esc(x)+"</div>"});(v.warnings||[]).forEach(function(x){h+="<div class=\"warn\">⚠️ "+esc(x)+"</div>"});if((v.visible_claims||[]).length){h+="<h3>Éléments visibles</h3>";(v.visible_claims||[]).forEach(function(x){h+="<span class=\"pill\">"+esc(x)+"</span>"})}analysis.innerHTML=h}
+function showMarket(m){marketBox.hidden=false;if(!m.ok){marketBox.innerHTML="<h2>Est-ce que ça vaut le coup ?</h2><div class=\"warn\">⚠️ "+esc(m.error||"Comparaison indisponible.")+"</div><button id=\"retry\" class=\"btn\">Réessayer la comparaison</button>";$("retry").onclick=runMarket;return}if(!m.median){marketBox.innerHTML="<h2>Est-ce que ça vaut le coup ?</h2><div class=\"warn\">Marché insuffisant : pas assez de véhicules comparables pour donner un verdict fiable.</div>";return}let tone=m.score>=55?"good":"bad";let h="<h2>Est-ce que ça vaut le coup ?</h2><div class=\""+tone+"\"><div class=\"score\">"+esc(m.score)+"/100</div><h3>"+esc(m.label)+"</h3><b>Prix demandé : "+esc(m.asking)+"</b><br>Médiane du marché : <b>"+Number(m.median).toLocaleString("fr-FR")+" €</b><br>Fourchette : "+Number(m.low).toLocaleString("fr-FR")+"–"+Number(m.high).toLocaleString("fr-FR")+" €<br><span class=\"muted\">"+(m.gap_pct>=0?"Sous":"Au-dessus")+" du marché de "+Math.abs(m.gap_pct).toFixed(1)+" % ("+Math.abs(m.gap_eur).toLocaleString("fr-FR")+" €).</span></div>";if(m.warning)h+="<div class=\"warn\">⚠️ "+esc(m.warning)+"</div>";h+="<h3>Comparables utilisés ("+m.comparables+")</h3>";(m.sample||[]).forEach(function(x){h+="<div class=\"comp\"><span class=\"price\">"+Number(x.price).toLocaleString("fr-FR")+" €</span> · "+(x.year||"?")+" · "+(x.mileage?Number(x.mileage).toLocaleString("fr-FR")+" km":"km ?")+"<br><span class=\"muted\">"+esc(x.source||"Source inconnue")+(x.city?" · "+esc(x.city):"")+"</span></div>"});marketBox.innerHTML=h}
+async function runMarket(){if(!vehicle)return;marketBox.hidden=false;marketBox.innerHTML="<h2>Est-ce que ça vaut le coup ?</h2><div class=\"status on\">🔎 Comparaison des véhicules similaires…</div>";try{const r=await fetch("/api/market",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(vehicle)}),m=await r.json();showMarket(m)}catch(e){showMarket({ok:false,error:"Impossible de joindre le comparateur marché."})}}
+go.onclick=async function(){if(busy)return;busy=true;go.disabled=true;analysis.hidden=true;marketBox.hidden=true;progress(10,"Préparation…",files.length+" photo(s) sélectionnée(s)");try{const fd=new FormData();files.forEach(function(f){fd.append("photos",f)});progress(25,"Lecture IA…","Analyse des captures par Gemini");const r=await fetch("/api/analyze",{method:"POST",body:fd}),j=await r.json();if(!r.ok)throw new Error(j.error||"Analyse indisponible");vehicle=j.vehicle;showAnalysis(vehicle);progress(65,"Comparaison marché…","Recherche CarHunt des véhicules comparables");await runMarket();progress(100,"Analyse terminée","Résultat prêt");setTimeout(function(){status.classList.remove("on")},700)}catch(e){progress(100,"Échec",e.message)}finally{busy=false;go.disabled=!files.length}};
 </script></main></body></html>`;
 app.get("/",(_req,res)=>res.type("html").send(HTML));
 app.use((err,_req,res,_next)=>{console.error(err);res.status(500).json({error:"Erreur serveur."})});
-app.listen(PORT,"0.0.0.0",()=>console.log(`Vaut le Coup ? — ${PORT} — Gemini ${PREFERRED_MODEL}`));
+app.listen(PORT,"0.0.0.0",()=>console.log("Vaut le Coup ? — "+PORT+" — Gemini "+PREFERRED_MODEL));
