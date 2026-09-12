@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node bootstrap.js",
-    "dev": "node --watch bootstrap.js"
+    "start": "node market-policy.js",
+    "dev": "node --watch market-policy.js"
   },
   "dependencies": {
     "express": "^5.1.0",
