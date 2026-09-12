@@ -52,34 +52,39 @@ function cleanAnalysisPayload(payload) {
           return !contradictionPatterns.some(re => re.test(text));
         });
       }
+      if (Array.isArray(vehicle[key])) {
+        vehicle[key] = vehicle[key].filter(item => {
+          const text = typeof item === 'string' ? item : JSON.stringify(item);
+          return !contradictionPatterns.some(re => re.test(text));
+        });
+      }
     }
   }
 
-  // Le contrôle technique peut être réalisé en cours d'année et rester valable
-  // jusqu'à deux ans plus tard. Supprimer uniquement le faux conflit connu où
-  // Gemini oppose simplement "CT réalisé en AAAA" à "fin de validité AAAA+2".
-  const removeFalseCtWarning = item => {
+  // Un CT réalisé pendant une année donnée peut rester valable jusqu'à deux ans plus tard.
+  // Ne supprimer que le faux conflit connu où Gemini oppose simplement "CT réalisé en AAAA"
+  // à "fin de validité CT AAAA+2". Les autres contradictions restent affichées.
+  const isFalseCtContradiction = item => {
     const text = typeof item === 'string' ? item : JSON.stringify(item);
     const normalized = text.toLowerCase();
     if (!/(contradiction|incoh[ée]rence|incompatible|conflit)/i.test(normalized) ||
-        !/contr[oô]le technique|\bct\b/i.test(normalized) ||
+        !/(contr[oô]le technique|\bct\b)/i.test(normalized) ||
         !/(validit|valable|expiration|expire)/i.test(normalized) ||
-        !/(r[eé]alis|effectu|pass[eé])/i.test(normalized)) return true;
-
+        !/(r[eé]alis|effectu|pass[eé])/i.test(normalized)) return false;
     const years = [...normalized.matchAll(/(?:20)\d{2}/g)].map(m => Number(m[0]));
-    if (years.length < 2) return true;
-    const minYear = Math.min(...years);
-    const maxYear = Math.max(...years);
-    return maxYear - minYear !== 2;
+    if (years.length < 2) return false;
+    return Math.max(...years) - Math.min(...years) === 2;
   };
 
   for (const key of ['warnings', 'points_of_attention', 'vigilance']) {
-    if (Array.isArray(payload[key])) payload[key] = payload[key].filter(removeFalseCtWarning);
+    if (Array.isArray(payload[key])) payload[key] = payload[key].filter(item => !isFalseCtContradiction(item));
+    if (Array.isArray(vehicle[key])) vehicle[key] = vehicle[key].filter(item => !isFalseCtContradiction(item));
   }
+  if (isFalseCtContradiction(vehicle.warning)) vehicle.warning = null;
+  if (isFalseCtContradiction(payload.warning)) payload.warning = null;
 
-  // Vigilance spécifique aux anciennes générations 1.2 PureTech : ne pas
-  // diagnostiquer une panne, mais inviter à vérifier entretien, courroie et
-  // éventuelles interventions liées à la consommation d'huile.
+  // Vigilance spécifique aux anciennes générations 1.2 PureTech : ne pas diagnostiquer
+  // une panne, mais inviter à vérifier entretien, courroie et éventuelles interventions.
   const vehicleText = [
     vehicle?.title,
     vehicle?.version,
@@ -89,12 +94,12 @@ function cleanAnalysisPayload(payload) {
   ].map(x => String(x ?? '').toLowerCase()).join(' ');
   const isPureTech12 = make.includes('peugeot') && /\b1[.,]2\s*puretech\b/i.test(vehicleText);
   const hasPureTechWarning = ['warnings', 'points_of_attention', 'vigilance']
-    .some(key => Array.isArray(payload[key]) && payload[key].some(item => /puretech|courroie|consommation d['’]huile/i.test(String(item))));
+    .some(key => Array.isArray(vehicle[key]) && vehicle[key].some(item => /puretech|courroie|consommation d['’]huile/i.test(String(item))));
 
   if (isPureTech12 && !hasPureTechWarning) {
     const warning = '⚠️ Moteur 1.2 PureTech : vérifier l’historique d’entretien, la courroie de distribution et les éventuelles interventions liées à une consommation d’huile avant achat.';
-    if (Array.isArray(payload.warnings)) payload.warnings.push(warning);
-    else payload.warnings = [warning];
+    if (Array.isArray(vehicle.warnings)) vehicle.warnings.push(warning);
+    else vehicle.warnings = [warning];
   }
 
   return payload;
