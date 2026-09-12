@@ -16,36 +16,27 @@ const median = a => { const x=[...a].sort((a,b)=>a-b); if(!x.length)return null;
 const quantile = (a,p) => { const x=[...a].sort((a,b)=>a-b); if(!x.length)return null; const i=(x.length-1)*p,l=Math.floor(i),h=Math.ceil(i); return x[l]+(x[h]-x[l])*(i-l); };
 const sleep = ms => new Promise(r=>setTimeout(r,ms));
 
-function parseJson(text) {
-  const s=String(text||"").replace(/^```json\s*/i,"").replace(/```\s*$/i,"").trim();
-  const a=s.indexOf("{"), b=s.lastIndexOf("}");
-  if(a<0||b<=a) throw new Error("Réponse IA invalide");
-  return JSON.parse(s.slice(a,b+1));
-}
+function parseJson(text) { const s=String(text||"").replace(/^```json\s*/i,"").replace(/```\s*$/i,"").trim(),a=s.indexOf("{"),b=s.lastIndexOf("}"); if(a<0||b<=a)throw new Error("Réponse IA invalide"); return JSON.parse(s.slice(a,b+1)); }
 
 async function gemini(files) {
   if(!GEMINI_KEY) throw new Error("Le moteur Gemini n'est pas configuré.");
-  const prompt = `Analyse ces captures/photos d'une même annonce automobile. Recoupe toutes les informations visibles. N'invente rien : donnée illisible = null. En cas de contradiction, garde la donnée la plus explicitement affichée et ajoute une alerte. Ne déduis pas le vendeur, la finition ou une caractéristique non visible. Retourne uniquement ce JSON : {"make":string|null,"model":string|null,"version":string|null,"year":number|null,"mileage_km":number|null,"price_eur":number|null,"energy":string|null,"gearbox":string|null,"power_hp":number|null,"seller_type":"professional"|"private"|null,"location":string|null,"confidence":number,"uncertain_fields":string[],"visible_claims":string[],"warnings":string[]}`;
+  const prompt=`Analyse ces captures/photos d'une même annonce automobile. Recoupe toutes les informations visibles. N'invente rien : donnée illisible = null. En cas de contradiction, garde la donnée la plus explicitement affichée et ajoute une alerte. Ne déduis pas le vendeur, la finition ou une caractéristique non visible. Retourne uniquement ce JSON : {"make":string|null,"model":string|null,"version":string|null,"year":number|null,"mileage_km":number|null,"price_eur":number|null,"energy":string|null,"gearbox":string|null,"power_hp":number|null,"seller_type":"professional"|"private"|null,"location":string|null,"confidence":number,"uncertain_fields":string[],"visible_claims":string[],"warnings":string[]}`;
   const parts=[{text:prompt},...files.map(f=>({inline_data:{mime_type:f.mimetype,data:f.buffer.toString("base64")}}))];
-  let last;
   for(let attempt=0;attempt<2;attempt++) {
     try {
-      const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`,{
-        method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{role:"user",parts}],generationConfig:{responseMimeType:"application/json",temperature:0.1}})
-      });
+      const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{role:"user",parts}],generationConfig:{responseMimeType:"application/json",temperature:0.1}})});
       const raw=await r.text();
       if(!r.ok){const e=new Error(`Gemini HTTP ${r.status}`);e.status=r.status;e.detail=raw.slice(0,500);throw e;}
-      const d=JSON.parse(raw), text=(d?.candidates?.[0]?.content?.parts||[]).map(x=>x.text||"").join("");
-      if(!text) throw new Error("Gemini n'a retourné aucun résultat.");
+      const d=JSON.parse(raw),text=(d?.candidates?.[0]?.content?.parts||[]).map(x=>x.text||"").join("");
+      if(!text)throw new Error("Gemini n'a retourné aucun résultat.");
       return parseJson(text);
-    } catch(e) { last=e; if(attempt===0 && [429,500,502,503,504].includes(e.status)){await sleep(700);continue;} throw e; }
+    } catch(e) { if(attempt===0&&[429,500,502,503,504].includes(e.status)){await sleep(700);continue;} throw e; }
   }
-  throw last;
 }
 
 function compatible(x,v) {
-  if(norm(x.make)!==norm(v.make)||norm(x.model)!==norm(v.model)) return false;
-  const y=n(v.year), iy=n(x.year), km=n(v.mileage_km), ik=n(x.mileage);
+  if(norm(x.make)!==norm(v.make)||norm(x.model)!==norm(v.model))return false;
+  const y=n(v.year),iy=n(x.year),km=n(v.mileage_km),ik=n(x.mileage);
   if(y!=null&&iy!=null&&Math.abs(y-iy)>3)return false;
   if(km!=null&&ik!=null&&Math.abs(km-ik)>30000)return false;
   if(v.energy&&x.energy&&!same(v.energy,x.energy))return false;
@@ -54,24 +45,24 @@ function compatible(x,v) {
 }
 
 async function carhunt(v) {
-  if(!CARHUNT_KEY) return {ok:false,user_message:"Comparaison marché indisponible : CarHunt n'est pas configuré."};
-  if(!v?.make||!v?.model) return {ok:false,user_message:"Impossible de comparer : marque ou modèle non identifié."};
+  if(!CARHUNT_KEY)return {ok:false,user_message:"Comparaison marché indisponible : CarHunt n'est pas configuré."};
+  if(!v?.make||!v?.model)return {ok:false,user_message:"Impossible de comparer : marque ou modèle non identifié."};
+  // CarHunt : requête volontairement minimale. Les critères véhicule sont filtrés localement pour éviter les 422 des filtres optionnels.
   const qs=new URLSearchParams({make:String(v.make).trim().toUpperCase(),model:String(v.model).trim().toUpperCase(),page_size:"100"});
-  const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),10000);
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);
   try {
     const r=await fetch(`https://api-pro.carhunt.fr/v1/listings/search?${qs.toString()}`,{headers:{Authorization:`Bearer ${CARHUNT_KEY}`,Accept:"application/json"},signal:controller.signal});
-    const raw=await r.text(); let d={}; try{d=raw?JSON.parse(raw):{}}catch{}
-    if(!r.ok){const detail=d?.detail??d?.message??d?.error; console.error("CarHunt",r.status,detail||raw.slice(0,500)); return {ok:false,user_message:`Comparaison marché indisponible (CarHunt ${r.status}). L'analyse du véhicule reste complète.`};}
-    const listings=Array.isArray(d.listings)?d.listings:[];
-    const comps=listings.filter(x=>compatible(x,v));
-    const priced=comps.filter(x=>n(x.price)>0), prices=priced.map(x=>n(x.price)), med=median(prices), ask=n(v.price_eur);
-    if(med==null) return {ok:true,comparables:0,asking:euro(ask),median:"Non déterminé",low:"Non déterminé",high:"Non déterminé",confidence:15,label:"Marché insuffisant",gap:"Aucun comparatif tarifaire exploitable n'a été trouvé.",sample:[]};
+    const raw=await r.text();let d={};try{d=raw?JSON.parse(raw):{}}catch{}
+    if(!r.ok){const detail=d?.detail??d?.message??d?.error;console.error("CarHunt",r.status,detail||raw.slice(0,500));return {ok:false,user_message:`Comparaison marché indisponible (CarHunt ${r.status}). L'analyse du véhicule reste complète.`};}
+    const comps=(Array.isArray(d.listings)?d.listings:[]).filter(x=>compatible(x,v));
+    const priced=comps.filter(x=>n(x.price)>0),prices=priced.map(x=>n(x.price)),med=median(prices),ask=n(v.price_eur);
+    if(med==null)return {ok:true,comparables:0,asking:euro(ask),median:"Non déterminé",low:"Non déterminé",high:"Non déterminé",confidence:15,label:"Marché insuffisant",gap:"Aucun comparatif tarifaire exploitable n'a été trouvé.",sample:[]};
     const gap=ask==null?null:Math.round((ask/med-1)*100);
     const label=gap==null?"Marché comparable":gap<=-15?"Très bonne affaire potentielle":gap<=-8?"Prix très intéressant":gap<=-3?"Plutôt intéressant":gap<=3?"Dans le marché":gap<=10?"Plutôt cher":"Cher";
     const confidence=Math.min(95,40+Math.min(30,prices.length*3)+(v.year!=null?8:0)+(v.mileage_km!=null?8:0)+(v.energy?4:0)+(v.gearbox?4:0));
     return {ok:true,comparables:prices.length,asking:euro(ask),median:euro(med),low:euro(quantile(prices,.25)),high:euro(quantile(prices,.75)),confidence,label,gap:gap==null?"Prix demandé non déterminé.":`Prix demandé ${Math.abs(gap)} % ${gap>=0?"au-dessus":"en dessous"} du prix médian.`,warning:prices.length<5?"Échantillon limité : prudence dans l'interprétation.":null,sample:priced.slice(0,10).map(x=>({price:x.price,year:x.year,mileage:x.mileage,energy:x.energy,gearbox:x.gearbox,version:x.version,seller_type:x.seller_type,city:x.city,source:x.source,url:x.source_url}))};
   } catch(e) { console.error("CarHunt error",e); return {ok:false,user_message:e.name==="AbortError"?"La comparaison marché a dépassé le délai prévu.":"La comparaison marché est temporairement indisponible. L'analyse du véhicule reste complète."}; }
-  finally { clearTimeout(timer); }
+  finally {clearTimeout(timer);}
 }
 
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
