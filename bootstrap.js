@@ -1,6 +1,5 @@
 // Production bootstrap with resilient Gemini fallback.
-// The UI/market stack stays unchanged; this layer only makes Gemini image analysis
-// tolerant of temporary 429/503/5xx model-capacity spikes.
+// Public proxy buffers complete responses before sending headers/body.
 import http from "node:http";
 
 const nativeFetch = globalThis.fetch;
@@ -24,23 +23,17 @@ function replaceModel(url, model) {
 async function resilientGeminiFetch(input, init) {
   const originalUrl = typeof input === "string" ? input : input?.url;
   if (!isGeminiGenerate(originalUrl)) return nativeFetch(input, init);
-
-  // Primary stable model first; if Google reports temporary capacity/rate limits,
-  // retry briefly and finally fall back to another stable free-tier Flash model.
   const models = ["gemini-3.6-flash", "gemini-3.6-flash", "gemini-3.6-flash", "gemini-3.5-flash"];
   let lastResponse;
-
   for (let i = 0; i < models.length; i++) {
     const url = replaceModel(originalUrl, models[i]);
     const request = typeof input === "string" ? url : new Request(url, input);
     const response = await nativeFetch(request, init);
     lastResponse = response;
-
     if (response.ok) return response;
     if (![429, 500, 502, 503, 504].includes(response.status)) return response;
     if (i < models.length - 1) await sleep(1000 * (i + 1));
   }
-
   return lastResponse;
 }
 
@@ -56,47 +49,23 @@ const server = http.createServer((req, res) => {
     method: req.method,
     headers: { ...req.headers, host: `127.0.0.1:${INTERNAL_PORT}` }
   };
-
   const upstream = http.request(options, upstreamRes => {
-    const isAnalyze = req.url?.split("?")[0] === "/api/analyze";
     const chunks = [];
-
-    upstreamRes.on("data", chunk => {
-      if (isAnalyze) chunks.push(chunk);
-      else res.write(chunk);
-    });
-
+    upstreamRes.on("data", chunk => chunks.push(chunk));
     upstreamRes.on("end", () => {
       const headers = { ...upstreamRes.headers };
       delete headers["content-length"];
       delete headers["transfer-encoding"];
+      delete headers["content-encoding"];
       for (const [key, value] of Object.entries(headers)) {
         if (value !== undefined) res.setHeader(key, value);
       }
       res.statusCode = upstreamRes.statusCode || 502;
-
-      if (isAnalyze) {
-        const raw = Buffer.concat(chunks).toString("utf8");
-        try {
-          const parsed = JSON.parse(raw);
-          const normalized = parsed?.vehicle
-            ? parsed
-            : parsed?.make || parsed?.model || parsed?.year || parsed?.price_eur
-              ? { ok: true, vehicle: parsed }
-              : parsed;
-          const body = JSON.stringify(normalized);
-          res.setHeader("content-type", "application/json; charset=utf-8");
-          res.setHeader("content-length", Buffer.byteLength(body));
-          res.end(body);
-        } catch {
-          res.end(raw);
-        }
-        return;
-      }
-      res.end();
+      const body = Buffer.concat(chunks);
+      res.setHeader("content-length", body.length);
+      res.end(body);
     });
   });
-
   upstream.on("error", err => {
     if (!res.headersSent) {
       res.statusCode = 502;
@@ -104,7 +73,6 @@ const server = http.createServer((req, res) => {
       res.end(JSON.stringify({ error: "Backend indisponible", detail: err.message }));
     } else res.end();
   });
-
   req.pipe(upstream);
 });
 
